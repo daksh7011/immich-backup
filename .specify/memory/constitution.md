@@ -1,50 +1,146 @@
-# [PROJECT_NAME] Constitution
-<!-- Example: Spec Constitution, TaskFlow Constitution, etc. -->
+<!--
+SYNC IMPACT REPORT
+==================
+Version change: [PLACEHOLDER] → 1.0.0 (initial ratification — all content new)
+
+Modified principles: N/A (first fill)
+
+Added sections:
+  - Core Principles (I–VI, all new)
+  - Hard Constraints
+  - Development Workflow
+  - Governance
+
+Removed sections: N/A
+
+Template propagation status:
+  - .specify/templates/plan-template.md   ✅ No structural changes needed; "Constitution Check"
+                                             section gates must reference the six principles below.
+  - .specify/templates/spec-template.md   ✅ No changes required; generic enough to remain as-is.
+  - .specify/templates/tasks-template.md  ✅ No changes required; phase structure is generic.
+
+Follow-up TODOs:
+  - None; all fields resolved from user-supplied hard rules and today's date.
+-->
+
+# immich-backup Constitution
 
 ## Core Principles
 
-### [PRINCIPLE_1_NAME]
-<!-- Example: I. Library-First -->
-[PRINCIPLE_1_DESCRIPTION]
-<!-- Example: Every feature starts as a standalone library; Libraries must be self-contained, independently testable, documented; Clear purpose required - no organizational-only libraries -->
+### I. Pure Go (NON-NEGOTIABLE)
 
-### [PRINCIPLE_2_NAME]
-<!-- Example: II. CLI Interface -->
-[PRINCIPLE_2_DESCRIPTION]
-<!-- Example: Every library exposes functionality via CLI; Text in/out protocol: stdin/args → stdout, errors → stderr; Support JSON + human-readable formats -->
+The project MUST be written in pure Go. CGo is strictly forbidden — zero exceptions.
+The binary MUST compile with `CGO_ENABLED=0` and ship as a self-contained, statically-linked
+executable suitable for Homebrew (macOS/Linux) and Chocolatey (Windows) distribution.
 
-### [PRINCIPLE_3_NAME]
-<!-- Example: III. Test-First (NON-NEGOTIABLE) -->
-[PRINCIPLE_3_DESCRIPTION]
-<!-- Example: TDD mandatory: Tests written → User approved → Tests fail → Then implement; Red-Green-Refactor cycle strictly enforced -->
+**Rationale**: CGo breaks cross-compilation, complicates static linking, and introduces
+hidden C-runtime dependencies that make distribution brittle. A single binary with no
+dynamic dependencies is the only acceptable artifact.
 
-### [PRINCIPLE_4_NAME]
-<!-- Example: IV. Integration Testing -->
-[PRINCIPLE_4_DESCRIPTION]
-<!-- Example: Focus areas requiring integration tests: New library contract tests, Contract changes, Inter-service communication, Shared schemas -->
+### II. Rclone Remote Abstraction (NON-NEGOTIABLE)
 
-### [PRINCIPLE_5_NAME]
-<!-- Example: V. Observability, VI. Versioning & Breaking Changes, VII. Simplicity -->
-[PRINCIPLE_5_DESCRIPTION]
-<!-- Example: Text I/O ensures debuggability; Structured logging required; Or: MAJOR.MINOR.BUILD format; Or: Start simple, YAGNI principles -->
+The tool MUST interact with rclone only through remote names that the user has already
+configured in their own rclone installation. It MUST NEVER pass provider-specific flags
+(e.g., `--s3-access-key-id`, `--drive-client-id`) to rclone invocations. The rclone
+remote name is the sole coupling point between this tool and any storage backend.
 
-## [SECTION_2_NAME]
-<!-- Example: Additional Constraints, Security Requirements, Performance Standards, etc. -->
+**Rationale**: Provider-specific flags create tight coupling to storage backends and
+duplicate configuration the user already manages in rclone. Any change to provider
+credentials or parameters must remain entirely outside this tool's scope.
 
-[SECTION_2_CONTENT]
-<!-- Example: Technology stack requirements, compliance standards, deployment policies, etc. -->
+### III. Fail-Fast & Clear Observability (NON-NEGOTIABLE)
 
-## [SECTION_3_NAME]
-<!-- Example: Development Workflow, Review Process, Quality Gates, etc. -->
+The tool MUST fail immediately — before starting any backup — if any required dependency
+is unreachable:
 
-[SECTION_3_CONTENT]
-<!-- Example: Code review requirements, testing gates, deployment approval process, etc. -->
+- rclone binary not found or not executable
+- Docker socket unreachable or permission denied
+- Immich Postgres container not running or not responding
+
+Every failure MUST emit a structured, human-readable log line that names the dependency,
+describes the error, and suggests a remediation step. Silent failures and partial backups
+are not acceptable.
+
+**Rationale**: A backup that silently completes with missing data is worse than no backup
+at all. Operators must be able to diagnose failures without inspecting internal state.
+
+### IV. Safe Postgres Backup (NON-NEGOTIABLE)
+
+The tool MUST NEVER copy, rsync, or snapshot the raw Postgres data directory.
+Database dumps MUST be produced exclusively via `pg_dumpall` executed inside the
+Immich Postgres container using `docker exec`. The resulting dump file is then handed
+to rclone for upload.
+
+**Rationale**: Copying a live Postgres data directory produces a corrupt or
+inconsistent backup. `pg_dumpall` guarantees a consistent logical dump without
+requiring the database to be stopped.
+
+### V. Rclone Configuration Is Read-Only (NON-NEGOTIABLE)
+
+The tool MUST NEVER create, modify, delete, or otherwise manage rclone remotes or
+its configuration file. It MUST operate only against remotes that already exist in
+the user's rclone configuration. If a referenced remote does not exist, the tool
+MUST fail with a clear error (see Principle III).
+
+**Rationale**: Modifying a shared tool's configuration on the user's behalf risks
+corrupting credentials for unrelated workflows. Configuration ownership belongs
+entirely to the user.
+
+### VI. Rootless Daemon Management
+
+The tool MUST support installation as a scheduled background service without requiring
+elevated (root/Administrator) privileges:
+
+- **macOS**: generate and manage a `launchd` user agent plist (`~/Library/LaunchAgents/`)
+- **Linux**: generate and manage a `systemd` user service unit (`~/.config/systemd/user/`)
+
+Root-level service installation (e.g., `/etc/systemd/system/`) is out of scope.
+
+**Rationale**: Requiring root for a personal media backup tool creates an unnecessary
+security surface and prevents installation in shared/restricted environments.
+
+## Hard Constraints
+
+- **Config file**: `~/.immich-backup/config.yaml`, parsed exclusively with
+  `gopkg.in/yaml.v3` plain structs. No Viper, Cobra config binding, or embedded config
+  languages.
+- **Distribution targets**: macOS (Homebrew), Windows (Chocolatey), Linux (Homebrew
+  or manual binary install). All platforms MUST be served by the same binary build matrix
+  (`GOOS`/`GOARCH` cross-compilation).
+- **Dependency on Docker**: Postgres access MUST go through `docker exec` against the
+  running Immich stack container. Direct TCP access to Postgres is not supported.
+- **Immich-specific, storage-agnostic**: Feature scope is limited to the Immich media
+  server. Support for other self-hosted services MUST NOT be added without a constitution
+  amendment.
+
+## Development Workflow
+
+- All tests MUST run without CGo (`CGO_ENABLED=0 go test ./...`).
+- Integration tests that require a live Docker daemon or rclone MUST be gated behind a
+  build tag (e.g., `//go:build integration`) and MUST NOT run in the standard `go test`
+  suite.
+- PRs touching backup or restore logic MUST include a Constitution Check confirming
+  compliance with Principles III, IV, and V before merge.
+- Complexity violations (e.g., adding a fourth external dependency type) MUST be
+  documented in the plan's Complexity Tracking table with justification.
 
 ## Governance
-<!-- Example: Constitution supersedes all other practices; Amendments require documentation, approval, migration plan -->
 
-[GOVERNANCE_RULES]
-<!-- Example: All PRs/reviews must verify compliance; Complexity must be justified; Use [GUIDANCE_FILE] for runtime development guidance -->
+This constitution supersedes all other development practices and style guides within
+the `immich-backup` repository. Any amendment requires:
 
-**Version**: [CONSTITUTION_VERSION] | **Ratified**: [RATIFICATION_DATE] | **Last Amended**: [LAST_AMENDED_DATE]
-<!-- Example: Version: 2.1.1 | Ratified: 2025-06-13 | Last Amended: 2025-07-16 -->
+1. A written rationale referencing which principle is affected and why the change
+   is necessary.
+2. A version bump following semantic versioning rules (see below).
+3. Propagation review across `.specify/templates/` and any agent guidance files.
+
+**Versioning policy**:
+
+- **MAJOR** — removal or redefinition of a NON-NEGOTIABLE principle.
+- **MINOR** — new principle added, or existing principle materially expanded.
+- **PATCH** — clarifications, wording fixes, non-semantic refinements.
+
+All PRs and code reviews MUST verify compliance with the NON-NEGOTIABLE principles
+(I–V). Principle VI compliance is verified only for daemon-management changes.
+
+**Version**: 1.0.0 | **Ratified**: 2026-04-06 | **Last Amended**: 2026-04-06
