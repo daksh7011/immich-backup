@@ -12,14 +12,19 @@ Built with Cobra for CLI, Bubble Tea + Lip Gloss + Huh for TUI, and yaml.v3 for 
 
 ## Constitution Compliance
 
-All design decisions comply with the `immich-backup` constitution v1.1.0:
+All design decisions comply with the `immich-backup` constitution v2.0.0:
 
 - No CGo. `CGO_ENABLED=0` throughout.
-- Rclone remote name is the only coupling point to storage backends.
-- Fail-fast before any backup if rclone binary, Docker socket, or Postgres container
-  is unreachable.
+- Rclone remote name is the only coupling point to storage backends — no provider-specific
+  flags ever.
+- Fail-fast before any backup if rclone binary, Docker socket, Postgres container, or
+  local rclone config (`~/.immich-backup/rclone.conf`) is missing or has no remotes.
 - Database backup exclusively via `pg_dumpall` through `docker exec`.
-- Rclone configuration is never created or modified by this tool.
+- The tool maintains an isolated rclone config at `~/.immich-backup/rclone.conf`. ALL
+  rclone invocations pass `--config ~/.immich-backup/rclone.conf`. The user's global
+  rclone config is never read or modified. When the local config is missing or empty,
+  the tool pauses, launches `rclone config --config ~/.immich-backup/rclone.conf`
+  interactively, then resumes.
 - Daemon management via launchd (macOS) and systemd user service (Linux). No root required.
 - All tests run against real infrastructure (testcontainers-go + real rclone binary).
   No mocks, no fakes, no build tags.
@@ -31,6 +36,12 @@ immich-backup/
 ├── main.go                          # entry point: calls cmd.Execute()
 ├── go.mod                           # module github.com/daksh7011/immich-backup
 ├── go.sum
+│
+# Runtime-managed files (not source, but documented for clarity):
+#   ~/.immich-backup/config.yaml     — tool config (yaml.v3)
+#   ~/.immich-backup/rclone.conf     — isolated rclone config (owned by this tool)
+#   ~/.immich-backup/last-run.json   — last backup result
+#   ~/.immich-backup/logs/daemon.log — daemon log file
 │
 ├── cmd/
 │   ├── root.go                      # root command, global flags, config loading middleware
@@ -57,8 +68,11 @@ immich-backup/
 │   │   ├── launchd.go               # macOS plist generation
 │   │   ├── systemd.go               # Linux unit file generation
 │   │   └── daemon_test.go
+│   ├── rcloneconf/
+│   │   ├── rcloneconf.go            # EnsureConfigured: pause-launch-resume via rclone config
+│   │   └── rcloneconf_test.go
 │   ├── doctor/
-│   │   ├── doctor.go                # prerequisite checks (rclone binary, docker socket, container)
+│   │   ├── doctor.go                # prerequisite checks (rclone binary, rclone.conf, docker, container)
 │   │   └── doctor_test.go
 │   ├── status/
 │   │   ├── status.go                # read/write ~/.immich-backup/last-run.json
@@ -139,8 +153,12 @@ type CheckResult struct {
     Message string
     Remedy  string
 }
-// Check verifies: (1) rclone binary in PATH via exec.LookPath,
-// (2) Docker socket accessible, (3) Postgres container running, (4) config valid.
+// Check verifies (in order):
+//   (1) rclone binary in PATH via exec.LookPath
+//   (2) ~/.immich-backup/rclone.conf exists and has ≥1 remote configured
+//   (3) Docker socket accessible
+//   (4) Postgres container running
+//   (5) config valid
 func Check(exec docker.Executor, cfg *config.Config) []CheckResult
 
 // internal/daemon
@@ -165,6 +183,44 @@ type LastRun struct {
 func Load(path string) (*LastRun, error)
 func Save(path string, r *LastRun) error
 ```
+
+### Rclone config constant
+
+The rclone config path is a hardcoded constant throughout the codebase — not a
+config field. Every package that invokes rclone uses it:
+
+```go
+// internal/backup/backup.go (and anywhere else rclone is exec'd)
+const RcloneConfigPath = "~/.immich-backup/rclone.conf"
+
+// All rclone invocations:
+exec.Command("rclone", "--config", RcloneConfigPath, "sync", ...)
+```
+
+### Pause-launch-resume flow (setup, configure, and first-run guard)
+
+Triggered when `~/.immich-backup/rclone.conf` is missing or contains no remotes.
+This check runs at two points: inside `setup`/`configure` before the Huh form, and
+as part of `doctor.Check()` (check #2) before any backup.
+
+```
+internal/rcloneconf/rcloneconf.go
+  EnsureConfigured(path string) error:
+    → if rclone.conf missing or has 0 remotes:
+        print "No rclone remote configured. Launching rclone config..."
+        os.exec("rclone", "--config", path, "config")  // inherits terminal; blocks
+        if still 0 remotes after exit → return error (Principle III)
+    → return nil (resume caller flow)
+```
+
+`internal/rcloneconf` is a new package with one exported function `EnsureConfigured`.
+It is called by:
+- `cmd/setup.go` and `cmd/configure.go` before presenting the Huh form
+- `doctor.Check()` as check #2 (non-interactive — only reports, does not launch)
+
+`doctor.Check()` does **not** launch `rclone config` interactively — it only reports
+that the rclone config is missing or empty, leaving the user to run `setup` or
+`configure` to fix it.
 
 ### Backup data flow (live TUI progress)
 
