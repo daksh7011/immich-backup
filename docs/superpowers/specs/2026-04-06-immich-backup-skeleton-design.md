@@ -129,7 +129,7 @@ type Executor interface {
 // No separate rclone package — rclone is invoked via os/exec within this package only.
 type Runner interface {
     RunMedia(remote, srcDir string) error
-    RunDatabase(container, destPath string) error
+    RunDatabase(container, pgUser, pgDB, destPath string) error
 }
 
 // internal/doctor
@@ -175,7 +175,7 @@ progress messages through a channel that the TUI model consumes via `tea.Cmd`:
 cmd/backup.go
   → doctor.Check()                    // fail-fast: exit 1 if any check fails
   → ch := make(chan tea.Msg)
-  → go backup.Run(cfg, exec, ch)      // runs RunDatabase then RunMedia; sends progress msgs
+  → go backup.Run(cfg, exec, ch)      // RunDatabase(container, pgUser, pgDB) then RunMedia; sends progress msgs
   → tea.NewProgram(backup_model{ch})  // blocks until backup completes
       ↳ backup_model.Update()         // receives ProgressMsg, ErrorMsg, DoneMsg from ch
   → status.Save()                     // write ~/.immich-backup/last-run.json after program exits
@@ -202,13 +202,13 @@ setup and configure:
 
 ### Logs command
 
-`cmd/logs.go` reads `Config.LogFile` from the Cobra context and tails that file
-directly using standard file I/O. No domain package needed.
+`cmd/logs.go` reads `Config.Daemon.LogPath` from the Cobra context and tails that
+file directly using standard file I/O. No domain package needed.
 
 ### Status command
 
 `cmd/status.go` calls `status.Load("~/.immich-backup/last-run.json")` for last-run
-data and reads `Config.Schedule` to display the next scheduled run time.
+data and reads `Config.Backup.Schedule` to display the next scheduled run time.
 
 ## Section 3: Config Schema
 
@@ -219,22 +219,54 @@ data and reads `Config.Schedule` to display the next scheduled run time.
 ### Format
 
 ```yaml
-rclone_remote: "myremote:immich-backups"    # remote:path — no provider flags ever
-immich_data_dir: "/path/to/immich/library"  # source dir for media sync
-postgres_container: "immich_postgres"        # docker container name
-schedule: "0 2 * * *"                        # cron expression for daemon
-log_file: "~/.immich-backup/backup.log"      # path to log file
+immich:
+  upload_location: /mnt/immich           # source directory for media sync
+  postgres_container: immich_postgres     # docker container name
+  postgres_user: postgres                 # postgres superuser for pg_dumpall
+  postgres_db: immich                     # database name
+
+backup:
+  rclone_remote: "b2-encrypted:immich-backup"  # remote:path — no provider flags ever
+  schedule: "0 3 * * *"                         # cron: media backup frequency
+  db_backup_frequency: "0 */6 * * *"            # cron: database dump frequency
+  retention:
+    daily: 7                                     # keep last N daily backups
+    weekly: 4                                    # keep last N weekly backups
+
+daemon:
+  log_path: ~/.immich-backup/logs/daemon.log
 ```
 
-### Go struct
+### Go structs
 
 ```go
 type Config struct {
-    RcloneRemote      string `yaml:"rclone_remote"`
-    ImmichDataDir     string `yaml:"immich_data_dir"`
+    Immich  ImmichConfig  `yaml:"immich"`
+    Backup  BackupConfig  `yaml:"backup"`
+    Daemon  DaemonConfig  `yaml:"daemon"`
+}
+
+type ImmichConfig struct {
+    UploadLocation    string `yaml:"upload_location"`
     PostgresContainer string `yaml:"postgres_container"`
-    Schedule          string `yaml:"schedule"`
-    LogFile           string `yaml:"log_file"`
+    PostgresUser      string `yaml:"postgres_user"`
+    PostgresDB        string `yaml:"postgres_db"`
+}
+
+type BackupConfig struct {
+    RcloneRemote      string          `yaml:"rclone_remote"`
+    Schedule          string          `yaml:"schedule"`
+    DBBackupFrequency string          `yaml:"db_backup_frequency"`
+    Retention         RetentionConfig `yaml:"retention"`
+}
+
+type RetentionConfig struct {
+    Daily  int `yaml:"daily"`
+    Weekly int `yaml:"weekly"`
+}
+
+type DaemonConfig struct {
+    LogPath string `yaml:"log_path"`
 }
 ```
 
@@ -246,11 +278,21 @@ on first run without needing a separate init step.
 
 ```go
 var defaults = Config{
-    RcloneRemote:      "myremote:immich-backups",
-    ImmichDataDir:     "/path/to/immich/library",
-    PostgresContainer: "immich_postgres",
-    Schedule:          "0 2 * * *",
-    LogFile:           "~/.immich-backup/backup.log",
+    Immich: ImmichConfig{
+        UploadLocation:    "/mnt/immich",
+        PostgresContainer: "immich_postgres",
+        PostgresUser:      "postgres",
+        PostgresDB:        "immich",
+    },
+    Backup: BackupConfig{
+        RcloneRemote:      "b2-encrypted:immich-backup",
+        Schedule:          "0 3 * * *",
+        DBBackupFrequency: "0 */6 * * *",
+        Retention:         RetentionConfig{Daily: 7, Weekly: 4},
+    },
+    Daemon: DaemonConfig{
+        LogPath: "~/.immich-backup/logs/daemon.log",
+    },
 }
 
 func Load(path string) (*Config, error) {
@@ -273,12 +315,18 @@ hint.
 ```go
 func (c *Config) Validate() error {
     var errs []string
-    if c.RcloneRemote == ""      { errs = append(errs, "rclone_remote is required") }
-    if c.ImmichDataDir == ""     { errs = append(errs, "immich_data_dir is required") }
-    if c.PostgresContainer == "" { errs = append(errs, "postgres_container is required") }
-    if c.Schedule == ""          { errs = append(errs, "schedule is required") }
-    if !validCron(c.Schedule)    { errs = append(errs, "schedule is not a valid cron expression") }
-    if c.LogFile == ""           { errs = append(errs, "log_file is required") }
+    if c.Immich.UploadLocation == ""    { errs = append(errs, "immich.upload_location is required") }
+    if c.Immich.PostgresContainer == "" { errs = append(errs, "immich.postgres_container is required") }
+    if c.Immich.PostgresUser == ""      { errs = append(errs, "immich.postgres_user is required") }
+    if c.Immich.PostgresDB == ""        { errs = append(errs, "immich.postgres_db is required") }
+    if c.Backup.RcloneRemote == ""      { errs = append(errs, "backup.rclone_remote is required") }
+    if c.Backup.Schedule == ""          { errs = append(errs, "backup.schedule is required") }
+    if !validCron(c.Backup.Schedule)    { errs = append(errs, "backup.schedule is not a valid cron expression") }
+    if c.Backup.DBBackupFrequency == "" { errs = append(errs, "backup.db_backup_frequency is required") }
+    if !validCron(c.Backup.DBBackupFrequency) { errs = append(errs, "backup.db_backup_frequency is not a valid cron expression") }
+    if c.Backup.Retention.Daily <= 0   { errs = append(errs, "backup.retention.daily must be > 0") }
+    if c.Backup.Retention.Weekly <= 0  { errs = append(errs, "backup.retention.weekly must be > 0") }
+    if c.Daemon.LogPath == ""           { errs = append(errs, "daemon.log_path is required") }
     if len(errs) > 0 {
         return fmt.Errorf("config validation failed:\n  - %s", strings.Join(errs, "\n  - "))
     }
@@ -289,7 +337,7 @@ func (c *Config) Validate() error {
 Doctor check output example:
 
 ```
-✗  Config       invalid: schedule is not a valid cron expression
+✗  Config       invalid: backup.schedule is not a valid cron expression
    → Run `immich-backup configure` to fix, or edit ~/.immich-backup/config.yaml manually
 ```
 
