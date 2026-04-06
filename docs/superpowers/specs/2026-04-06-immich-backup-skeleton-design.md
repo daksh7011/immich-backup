@@ -12,14 +12,17 @@ Built with Cobra for CLI, Bubble Tea + Lip Gloss + Huh for TUI, and yaml.v3 for 
 
 ## Constitution Compliance
 
-All design decisions comply with the `immich-backup` constitution v1.0.0:
+All design decisions comply with the `immich-backup` constitution v1.1.0:
 
 - No CGo. `CGO_ENABLED=0` throughout.
 - Rclone remote name is the only coupling point to storage backends.
-- Fail-fast before any backup if rclone, Docker socket, or Postgres container is unreachable.
+- Fail-fast before any backup if rclone binary, Docker socket, or Postgres container
+  is unreachable.
 - Database backup exclusively via `pg_dumpall` through `docker exec`.
 - Rclone configuration is never created or modified by this tool.
 - Daemon management via launchd (macOS) and systemd user service (Linux). No root required.
+- All tests run against real infrastructure (testcontainers-go + real rclone binary).
+  No mocks, no fakes, no build tags.
 
 ## Section 1: Directory Structure
 
@@ -30,13 +33,13 @@ immich-backup/
 ├── go.sum
 │
 ├── cmd/
-│   ├── root.go                      # root command, global flags, config init
-│   ├── setup.go                     # interactive first-run wizard
-│   ├── configure.go                 # re-run any part of setup
-│   ├── backup.go                    # run a backup now
+│   ├── root.go                      # root command, global flags, config loading middleware
+│   ├── setup.go                     # interactive first-run wizard (calls config.Load directly)
+│   ├── configure.go                 # re-run any part of setup (calls config.Load directly)
+│   ├── backup.go                    # run a backup now; runs full doctor.Check() internally
 │   ├── status.go                    # last backup status + next scheduled run
-│   ├── doctor.go                    # check all prerequisites
-│   ├── logs.go                      # tail/show logs
+│   ├── doctor.go                    # display all prerequisite check results
+│   ├── logs.go                      # tail/show log file (reads log path from config directly)
 │   └── daemon.go                    # sub-commands: install/uninstall/start/stop/restart/status/logs
 │
 ├── internal/
@@ -44,7 +47,7 @@ immich-backup/
 │   │   ├── config.go                # Config struct + Load/Save/Validate using yaml.v3
 │   │   └── config_test.go
 │   ├── backup/
-│   │   ├── backup.go                # orchestrates media sync + db dump
+│   │   ├── backup.go                # orchestrates media sync + db dump; rclone exec lives here
 │   │   └── backup_test.go
 │   ├── docker/
 │   │   ├── docker.go                # Docker socket client, exec, container lookup
@@ -55,13 +58,16 @@ immich-backup/
 │   │   ├── systemd.go               # Linux unit file generation
 │   │   └── daemon_test.go
 │   ├── doctor/
-│   │   ├── doctor.go                # prerequisite checks (rclone, docker, container)
+│   │   ├── doctor.go                # prerequisite checks (rclone binary, docker socket, container)
 │   │   └── doctor_test.go
+│   ├── status/
+│   │   ├── status.go                # read/write ~/.immich-backup/last-run.json
+│   │   └── status_test.go
 │   └── tui/
 │       ├── model.go                 # shared Bubble Tea types/helpers
 │       ├── setup_model.go           # Huh form model for setup wizard
 │       ├── configure_model.go
-│       ├── backup_model.go          # progress display during backup
+│       ├── backup_model.go          # live progress display; receives msgs via channel
 │       ├── status_model.go
 │       ├── doctor_model.go
 │       ├── logs_model.go
@@ -86,7 +92,30 @@ internal/<domain>/ → internal/docker/
 `cmd/` is the only package that imports `internal/tui/`. Domain packages never import
 `tui/` or `cmd/`. Dependencies flow inward only.
 
-### Core interfaces
+### PersistentPreRun responsibility
+
+`root.go` registers a `PersistentPreRun` that runs for every command **except**
+`setup` and `configure` (which load config themselves). Its sole responsibility is:
+
+1. Call `config.Load("~/.immich-backup/config.yaml")` and store the result in the
+   Cobra command context.
+2. If `config.Load()` returns an error (validation failure or malformed file), print
+   the error and exit with code 1 immediately.
+
+`PersistentPreRun` does **not** call `doctor.Check()`. Doctor checks are the
+responsibility of individual command handlers:
+
+| Command    | Runs doctor check? | Notes |
+|------------|--------------------|-------|
+| `backup`   | Yes — full check   | Fails fast if any check fails |
+| `doctor`   | Yes — full check   | Displays all results, does not exit on failure |
+| `setup`    | No                 | Exempt; may run before prerequisites exist |
+| `configure`| No                 | Exempt; may run before prerequisites exist |
+| `status`   | No                 | Must work even when backup prerequisites are down |
+| `logs`     | No                 | Must work even when backup prerequisites are down |
+| `daemon`   | No                 | Service management must work independently of backup prereqs |
+
+### Core interfaces and functions
 
 ```go
 // internal/docker
@@ -96,6 +125,8 @@ type Executor interface {
 }
 
 // internal/backup
+// rclone subprocess execution lives inside backup.go alongside RunMedia/RunDatabase.
+// No separate rclone package — rclone is invoked via os/exec within this package only.
 type Runner interface {
     RunMedia(remote, srcDir string) error
     RunDatabase(container, destPath string) error
@@ -108,30 +139,76 @@ type CheckResult struct {
     Message string
     Remedy  string
 }
+// Check verifies: (1) rclone binary in PATH via exec.LookPath,
+// (2) Docker socket accessible, (3) Postgres container running, (4) config valid.
 func Check(exec docker.Executor, cfg *config.Config) []CheckResult
+
+// internal/daemon
+type Manager interface {
+    Install(cfg *config.Config) error
+    Uninstall() error
+    Start() error
+    Stop() error
+    Restart() error
+    Status() (string, error)
+    Logs() (string, error)
+}
+// New returns the platform-appropriate Manager (launchd on macOS, systemd on Linux).
+func New() Manager
+
+// internal/status
+type LastRun struct {
+    Time   time.Time `json:"time"`
+    Result string    `json:"result"`  // "success" | "error"
+    Error  string    `json:"error,omitempty"`
+}
+func Load(path string) (*LastRun, error)
+func Save(path string, r *LastRun) error
 ```
 
-### Backup data flow
+### Backup data flow (live TUI progress)
+
+`cmd/backup.go` starts a Bubble Tea program first, then the backup runner sends
+progress messages through a channel that the TUI model consumes via `tea.Cmd`:
 
 ```
 cmd/backup.go
-  → doctor.Check()           // fail-fast: abort if any check fails
-  → backup.RunDatabase()     // docker.Exec(pg_dumpall) → gzip → local tmp file
-  → backup.RunMedia()        // exec: rclone sync <remote>:<path>
-  → tui/backup_model.go      // streams progress back to Bubble Tea model
+  → doctor.Check()                    // fail-fast: exit 1 if any check fails
+  → ch := make(chan tea.Msg)
+  → go backup.Run(cfg, exec, ch)      // runs RunDatabase then RunMedia; sends progress msgs
+  → tea.NewProgram(backup_model{ch})  // blocks until backup completes
+      ↳ backup_model.Update()         // receives ProgressMsg, ErrorMsg, DoneMsg from ch
+  → status.Save()                     // write ~/.immich-backup/last-run.json after program exits
 ```
+
+The backup runner sends typed messages (`ProgressMsg`, `ErrorMsg`, `DoneMsg`) to the
+channel. The Bubble Tea model's `Update()` function reads from the channel via a
+`tea.Cmd` that wraps a channel receive. This keeps `internal/backup` free of any TUI
+imports — it only writes to a plain `chan tea.Msg` received as a parameter.
 
 ### Config flow
 
 ```
-cmd/root.go (PersistentPreRun)
+PersistentPreRun (all commands except setup and configure):
   → config.Load("~/.immich-backup/config.yaml")
   → stored in cobra.Command context
   → passed to each sub-command handler
+
+setup and configure:
+  → call config.Load() directly at the start of their Run function
+  → config.Load() auto-creates the file with defaults if missing
+  → after Huh form completes, call config.Save() to persist user choices
 ```
 
-`setup` and `configure` are exempt from the `PersistentPreRun` doctor check — they
-are designed to run even when config or prerequisites are broken.
+### Logs command
+
+`cmd/logs.go` reads `Config.LogFile` from the Cobra context and tails that file
+directly using standard file I/O. No domain package needed.
+
+### Status command
+
+`cmd/status.go` calls `status.Load("~/.immich-backup/last-run.json")` for last-run
+data and reads `Config.Schedule` to display the next scheduled run time.
 
 ## Section 3: Config Schema
 
@@ -164,7 +241,8 @@ type Config struct {
 ### Load-or-initialize behavior
 
 If the config file does not exist, `Load()` writes the defaults to disk and returns
-them. No separate init step is required.
+them. `setup` and `configure` call `Load()` directly, which triggers auto-creation
+on first run without needing a separate init step.
 
 ```go
 var defaults = Config{
@@ -180,16 +258,17 @@ func Load(path string) (*Config, error) {
         cfg := defaults
         return &cfg, Save(path, &cfg)
     }
-    // unmarshal and validate existing file
+    // unmarshal then call Validate()
 }
 ```
 
 ### Strict validation
 
 `Load()` calls `Validate()` after every unmarshal. Any malformed or missing field
-is a hard error — the program exits with code 1 and a clear message listing every
+is a hard error — the caller exits with code 1 and a clear message listing every
 failed field. The user can fix via `immich-backup configure` or by editing the file
-manually. `doctor` surfaces these errors with remediation hints.
+manually. `doctor` surfaces these errors as a named `CheckResult` with a remediation
+hint.
 
 ```go
 func (c *Config) Validate() error {
@@ -218,9 +297,12 @@ Doctor check output example:
 
 ### Error handling strategy
 
-- `PersistentPreRun` on the root command calls `doctor.Check()` before every command
-  except `setup` and `configure`.
-- Any failed check exits immediately with code `1` and a descriptive log message.
+- `PersistentPreRun` in `root.go` loads config and exits with code `1` on any config
+  error. It does not run doctor checks.
+- `cmd/backup.go` runs a full `doctor.Check()` at the start of its `Run` function and
+  exits with code `1` if any check fails, with a clear logged message per failed check.
+- `cmd/doctor.go` runs `doctor.Check()` and displays all results via the TUI model —
+  it does not exit on failure, it reports.
 - Runtime errors (rclone failure, docker exec failure) exit with code `2`.
 
 ### Exit codes
@@ -228,7 +310,7 @@ Doctor check output example:
 | Code | Meaning |
 |------|---------|
 | `0`  | Success |
-| `1`  | Prerequisite or config failure (doctor-catchable) |
+| `1`  | Prerequisite or config failure |
 | `2`  | Runtime failure during backup or daemon operation |
 
 ### Logging
@@ -256,9 +338,10 @@ os.Exit(1)
 
 ### Philosophy
 
-No mocks, no fakes, no hand-written stubs. All tests run against real infrastructure
-using [testcontainers-go](https://golang.testcontainers.org/). If a test cannot run
-against the real system, it does not exist.
+No mocks, no fakes, no hand-written stubs. All tests that exercise external
+dependencies run against real infrastructure using
+[testcontainers-go](https://golang.testcontainers.org/). No build tags — a plain
+`go test ./...` runs everything.
 
 ### Database backup tests (`internal/backup`, `internal/docker`)
 
@@ -270,7 +353,7 @@ against the real system, it does not exist.
 
 - Create a temp directory with dummy files (small images/text files).
 - Configure a `local:` rclone remote pointing to a temp destination directory.
-- Run `rclone sync` via the backup runner.
+- Run `rclone sync` via the backup runner using the real rclone binary.
 - Assert destination contains exactly the expected files with matching sizes and mtimes.
 
 ### Doctor tests (`internal/doctor`)
@@ -278,6 +361,8 @@ against the real system, it does not exist.
 - Spin up the postgres container and assert all `CheckResult` entries have `OK: true`.
 - Stop/remove the container and assert the correct `CheckResult` failures are returned
   with non-empty `Remedy` fields.
+- Assert that a missing rclone binary produces a `CheckResult` with `OK: false` for
+  the rclone check (temporarily rename the binary or use a temp PATH in the test).
 
 ### Config tests (`internal/config`)
 
@@ -285,14 +370,27 @@ against the real system, it does not exist.
 - Table-driven cases: missing file (auto-create with defaults), missing required field,
   invalid cron expression, malformed YAML.
 
+### Status tests (`internal/status`)
+
+- Write a `LastRun` struct to a temp file, read it back, assert round-trip equality.
+
+### Daemon tests (`internal/daemon`)
+
+- **In scope for skeleton**: Test `launchd.go` and `systemd.go` generation functions
+  (plist and unit file content) as string assertions — no OS calls needed.
+- **Explicitly deferred**: `Manager` interface methods `Install`, `Uninstall`, `Start`,
+  `Stop`, `Restart`, `Status`, and `Logs` interact with OS-level service managers
+  (launchd on macOS, systemd on Linux) that are not available in a generic CI
+  environment. These are intentionally stubbed in the skeleton with
+  `return fmt.Errorf("not implemented")` and will be tested manually on each target
+  platform before the first release.
+
 ### Test execution
 
 ```bash
-# All tests (requires Docker socket accessible):
+# All tests (requires Docker socket and rclone binary accessible):
 go test ./...
 
 # Verify no CGo:
 CGO_ENABLED=0 go test ./...
 ```
-
-No build tags. The whole project assumes Docker is a prerequisite, so tests do too.

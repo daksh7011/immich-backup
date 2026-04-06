@@ -116,9 +116,9 @@ security surface and prevents installation in shared/restricted environments.
 ## Development Workflow
 
 - All tests MUST run without CGo (`CGO_ENABLED=0 go test ./...`).
-- Integration tests that require a live Docker daemon or rclone MUST be gated behind a
-  build tag (e.g., `//go:build integration`) and MUST NOT run in the standard `go test`
-  suite.
+- All tests run against real infrastructure (testcontainers-go + real rclone binary).
+  No mocks, no fakes, no build tags. Docker and rclone are hard runtime prerequisites
+  for this project, so tests require them too. A plain `go test ./...` runs everything.
 - PRs touching backup or restore logic MUST include a Constitution Check confirming
   compliance with Principles III, IV, and V before merge.
 - Complexity violations (e.g., adding a fourth external dependency type) MUST be
@@ -143,4 +143,4 @@ the `immich-backup` repository. Any amendment requires:
 All PRs and code reviews MUST verify compliance with the NON-NEGOTIABLE principles
 (I–V). Principle VI compliance is verified only for daemon-management changes.
 
-**Version**: 1.0.0 | **Ratified**: 2026-04-06 | **Last Amended**: 2026-04-06
+**Version**: 1.1.0 | **Ratified**: 2026-04-06 | **Last Amended**: 2026-04-06
