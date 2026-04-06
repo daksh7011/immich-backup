@@ -5,10 +5,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 
 	"github.com/docker/docker/api/types/container"
 	dockerclient "github.com/docker/docker/client"
+	"github.com/docker/docker/pkg/stdcopy"
 )
 
 // Executor runs commands inside Docker containers and inspects container state.
@@ -58,11 +58,20 @@ func (c *Client) Exec(containerName, command string, args ...string) ([]byte, er
 	}
 	defer resp.Close()
 
-	var buf bytes.Buffer
-	if _, err := io.Copy(&buf, resp.Reader); err != nil {
+	var stdout, stderr bytes.Buffer
+	if _, err := stdcopy.StdCopy(&stdout, &stderr, resp.Reader); err != nil {
 		return nil, fmt.Errorf("read exec output: %w", err)
 	}
-	return buf.Bytes(), nil
+
+	inspect, err := c.cli.ContainerExecInspect(ctx, execID.ID)
+	if err != nil {
+		return nil, fmt.Errorf("exec inspect: %w", err)
+	}
+	if inspect.ExitCode != 0 {
+		return nil, fmt.Errorf("exec exited with code %d: %s", inspect.ExitCode, stderr.String())
+	}
+
+	return stdout.Bytes(), nil
 }
 
 // IsContainerRunning returns true if containerName exists and is in Running state.

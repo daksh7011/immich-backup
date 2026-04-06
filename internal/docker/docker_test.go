@@ -43,8 +43,15 @@ func TestClient_Exec(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Exec: %v", err)
 	}
-	if !strings.Contains(string(out), "hello-from-exec") {
-		t.Errorf("expected 'hello-from-exec' in output, got: %q", string(out))
+	got := string(out)
+	if !strings.Contains(got, "hello-from-exec") {
+		t.Errorf("expected 'hello-from-exec' in output, got: %q", got)
+	}
+	// Ensure no Docker stream multiplexing headers leaked into output.
+	// A clean decode produces printable text only; binary header bytes would
+	// appear as non-printable runes before the first word.
+	if len(got) > 0 && got[0] != 'h' {
+		t.Errorf("output starts with unexpected byte 0x%02x; possible stdcopy decode failure", got[0])
 	}
 }
 

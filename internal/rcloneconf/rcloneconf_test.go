@@ -31,9 +31,9 @@ func TestEnsureConfigured_EmptyFileIsNotInteractive(t *testing.T) {
 		t.Fatalf("write empty config: %v", err)
 	}
 	err := rcloneconf.EnsureConfigured(path)
-	// We accept either a launch error or a "no remotes" error —
-	// both mean the guard functioned correctly.
+	// In CI / non-TTY environments rclone config exits immediately, leaving
+	// no remotes. We require an error to prove the post-launch guard fired.
 	if err == nil {
-		t.Log("Note: rclone config may have been interactive — run manually to confirm.")
+		t.Fatal("expected error for empty config with no TTY, got nil")
 	}
 }

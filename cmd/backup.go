@@ -50,7 +50,6 @@ func newBackupCmd() *cobra.Command {
 				config.RcloneConfigPath(),
 				cfg.Immich.PostgresContainer,
 				cfg.Immich.PostgresUser,
-				cfg.Immich.PostgresDB,
 				cfg.Immich.UploadLocation,
 				cfg.Backup.RcloneRemote,
 				client,

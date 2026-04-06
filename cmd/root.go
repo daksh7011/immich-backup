@@ -14,23 +14,35 @@ import (
 type contextKey struct{}
 
 // GetConfig retrieves the loaded config from the command's context.
-// Panics if called on a command that does not go through PersistentPreRun.
+// Exits with a clear error if called on a command that bypasses PersistentPreRunE.
 func GetConfig(cmd *cobra.Command) *config.Config {
-	return cmd.Context().Value(contextKey{}).(*config.Config)
+	v := cmd.Context().Value(contextKey{})
+	if v == nil {
+		fmt.Fprintln(os.Stderr, "internal error: config not available for this command; ensure it is not in the skip list")
+		os.Exit(1)
+	}
+	return v.(*config.Config)
 }
 
 var rootCmd = &cobra.Command{
 	Use:   "immich-backup",
 	Short: "Back up your Immich media library using rclone",
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		// setup, configure, doctor, and logs load config themselves or don't need it.
-		skip := map[string]bool{
-			"setup":     true,
-			"configure": true,
-			"doctor":    true,
-			"logs":      true,
+		// Commands that load config themselves or need no config.
+		// Use full CommandPath to avoid ambiguity (e.g. "status" vs "daemon status").
+		skipPaths := map[string]bool{
+			"immich-backup setup":            true,
+			"immich-backup configure":        true,
+			"immich-backup doctor":           true,
+			"immich-backup logs":             true,
+			"immich-backup daemon uninstall": true,
+			"immich-backup daemon start":     true,
+			"immich-backup daemon stop":      true,
+			"immich-backup daemon restart":   true,
+			"immich-backup daemon status":    true,
+			"immich-backup daemon logs":      true,
 		}
-		if skip[cmd.Name()] {
+		if skipPaths[cmd.CommandPath()] {
 			return nil
 		}
 		cfg, err := config.Load(config.DefaultConfigPath())

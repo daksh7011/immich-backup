@@ -18,6 +18,18 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
+// localRcloneConf writes a rclone.conf with a local remote pointing at dir.
+func localRcloneConf(t *testing.T, remoteName string) (confPath, remoteSyntax string) {
+	t.Helper()
+	dstDir := t.TempDir()
+	confPath = filepath.Join(t.TempDir(), "rclone.conf")
+	content := fmt.Sprintf("[%s]\ntype = local\nnounc = true\n", remoteName)
+	if err := os.WriteFile(confPath, []byte(content), 0600); err != nil {
+		t.Fatalf("write rclone.conf: %v", err)
+	}
+	return confPath, remoteName + ":" + dstDir
+}
+
 func newDockerClient(t *testing.T) *docker.Client {
 	t.Helper()
 	c, err := docker.NewClient()
@@ -53,7 +65,7 @@ func TestRunDatabase_ProducesDump(t *testing.T) {
 
 	destPath := filepath.Join(t.TempDir(), "dump.sql.gz")
 	r := backup.New(newDockerClient(t), confPath)
-	if err := r.RunDatabase(name, "postgres", "immich", destPath); err != nil {
+	if err := r.RunDatabase(name, "postgres", destPath); err != nil {
 		t.Fatalf("RunDatabase: %v", err)
 	}
 
@@ -73,6 +85,98 @@ func TestRunDatabase_ProducesDump(t *testing.T) {
 	}
 	if len(content) == 0 {
 		t.Error("dump content is empty")
+	}
+	// Verify the output is valid SQL, not Docker stream framing headers.
+	if !strings.Contains(string(content), "PostgreSQL database dump") {
+		t.Errorf("dump does not contain expected SQL preamble; possible stdcopy decode failure. First 200 bytes: %q", string(content[:min(200, len(content))]))
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func startPostgres(t *testing.T) (containerName string) {
+	t.Helper()
+	ctx := context.Background()
+	pg, err := postgres.RunContainer(ctx,
+		testcontainers.WithImage("postgres:17-alpine"),
+		postgres.WithDatabase("immich"),
+		postgres.WithUsername("postgres"),
+		postgres.WithPassword("postgres"),
+		testcontainers.WithWaitStrategy(
+			wait.ForLog("database system is ready to accept connections").WithOccurrence(2),
+		),
+	)
+	if err != nil {
+		t.Fatalf("start postgres: %v", err)
+	}
+	t.Cleanup(func() { _ = pg.Terminate(ctx) })
+	rawName, _ := pg.Name(ctx)
+	return strings.TrimPrefix(rawName, "/")
+}
+
+func collectChan(ch <-chan any) []any {
+	var msgs []any
+	for msg := range ch {
+		msgs = append(msgs, msg)
+	}
+	return msgs
+}
+
+func TestRun_HappyPath(t *testing.T) {
+	pgName := startPostgres(t)
+
+	srcDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcDir, "photo.jpg"), []byte("dummy"), 0644); err != nil {
+		t.Fatalf("create dummy file: %v", err)
+	}
+
+	confPath, remote := localRcloneConf(t, "rundst")
+
+	ch := make(chan any, 20)
+	go backup.Run(confPath, pgName, "postgres", srcDir, remote, newDockerClient(t), ch)
+	msgs := collectChan(ch)
+
+	if len(msgs) == 0 {
+		t.Fatal("no messages received on channel")
+	}
+	// Channel must be closed (range above would block otherwise — already verified)
+	// Last message must be DoneMsg
+	if _, ok := msgs[len(msgs)-1].(backup.DoneMsg); !ok {
+		t.Errorf("expected DoneMsg as last message, got %T: %v", msgs[len(msgs)-1], msgs[len(msgs)-1])
+	}
+	for _, msg := range msgs {
+		if em, ok := msg.(backup.ErrorMsg); ok {
+			t.Errorf("unexpected ErrorMsg: %v", em.Err)
+		}
+	}
+}
+
+func TestRun_DatabaseFailure_StopsEarlyAndClosesChannel(t *testing.T) {
+	confPath, remote := localRcloneConf(t, "faildst")
+
+	ch := make(chan any, 20)
+	// Non-existent container forces an immediate database failure.
+	go backup.Run(confPath, "nonexistent-container-xyzxyz", "postgres", t.TempDir(), remote, newDockerClient(t), ch)
+	msgs := collectChan(ch)
+
+	hasError := false
+	for _, msg := range msgs {
+		if _, ok := msg.(backup.ErrorMsg); ok {
+			hasError = true
+		}
+	}
+	if !hasError {
+		t.Error("expected at least one ErrorMsg when database container is missing")
+	}
+	if len(msgs) > 0 {
+		if _, ok := msgs[len(msgs)-1].(backup.DoneMsg); ok {
+			t.Error("must not send DoneMsg when database backup fails")
+		}
 	}
 }
 

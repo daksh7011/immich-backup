@@ -4,10 +4,10 @@ package backup
 import (
 	"compress/gzip"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/daksh7011/immich-backup/internal/docker"
@@ -23,7 +23,7 @@ type DoneMsg struct{}
 // Runner orchestrates database and media backup operations.
 type Runner interface {
 	RunMedia(remote, srcDir string) error
-	RunDatabase(container, pgUser, pgDB, destPath string) error
+	RunDatabase(container, pgUser, destPath string) error
 }
 
 // BackupRunner is the production implementation of Runner.
@@ -43,7 +43,7 @@ func New(exec docker.Executor, rcloneConf string) Runner {
 
 // RunDatabase dumps all databases from the Postgres container via pg_dumpall,
 // gzips the output, and writes it to destPath.
-func (r *BackupRunner) RunDatabase(container, pgUser, pgDB, destPath string) error {
+func (r *BackupRunner) RunDatabase(container, pgUser, destPath string) error {
 	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 		return fmt.Errorf("create dump dir: %w", err)
 	}
@@ -60,10 +60,12 @@ func (r *BackupRunner) RunDatabase(container, pgUser, pgDB, destPath string) err
 	defer f.Close()
 
 	gz := gzip.NewWriter(f)
-	defer gz.Close()
-
-	if _, err := io.WriteString(gz, string(out)); err != nil {
+	if _, err := gz.Write(out); err != nil {
+		_ = gz.Close()
 		return fmt.Errorf("write gzip: %w", err)
+	}
+	if err := gz.Close(); err != nil {
+		return fmt.Errorf("flush gzip: %w", err)
 	}
 	return nil
 }
@@ -81,11 +83,11 @@ func (r *BackupRunner) RunMedia(remote, srcDir string) error {
 	return nil
 }
 
-// Run orchestrates a full backup: database then media.
+// Run orchestrates a full backup: database dump → upload dump → media sync.
 // Progress, errors, and completion are sent to ch for live TUI display.
 func Run(
-	rcloneConf, container, pgUser, pgDB, uploadLocation, rcloneRemote string,
-	exec docker.Executor,
+	rcloneConf, container, pgUser, uploadLocation, rcloneRemote string,
+	executor docker.Executor,
 	ch chan<- any,
 ) {
 	send := func(msg any) {
@@ -95,18 +97,28 @@ func Run(
 		}
 	}
 
-	r := New(exec, rcloneConf)
+	r := New(executor, rcloneConf)
 
 	send(ProgressMsg{Text: "Starting database backup..."})
 	dumpPath := filepath.Join(os.TempDir(),
 		fmt.Sprintf("immich-db-%s.sql.gz", time.Now().Format("20060102-150405")))
-	if err := r.RunDatabase(container, pgUser, pgDB, dumpPath); err != nil {
+	if err := r.RunDatabase(container, pgUser, dumpPath); err != nil {
 		send(ErrorMsg{Err: fmt.Errorf("database backup: %w", err)})
 		close(ch)
 		return
 	}
-	send(ProgressMsg{Text: "Database backup complete. Starting media sync..."})
 
+	send(ProgressMsg{Text: "Uploading database dump to remote..."})
+	remoteDBDir := rcloneRemote + "/db"
+	uploadOut, uploadErr := exec.Command("rclone", "--config", rcloneConf, "copy", dumpPath, remoteDBDir).CombinedOutput()
+	_ = os.Remove(dumpPath) // best-effort; uploaded or failed, temp file is no longer needed
+	if uploadErr != nil {
+		send(ErrorMsg{Err: fmt.Errorf("upload database dump: %w: %s", uploadErr, strings.TrimSpace(string(uploadOut)))})
+		close(ch)
+		return
+	}
+
+	send(ProgressMsg{Text: "Database dump uploaded. Starting media sync..."})
 	if err := r.RunMedia(rcloneRemote, uploadLocation); err != nil {
 		send(ErrorMsg{Err: fmt.Errorf("media sync: %w", err)})
 		close(ch)

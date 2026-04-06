@@ -12,6 +12,7 @@ import (
 	"github.com/daksh7011/immich-backup/internal/config"
 )
 
+
 const plistLabel = "com.immich-backup.agent"
 const plistFilename = plistLabel + ".plist"
 
@@ -45,24 +46,34 @@ var plistTmpl = template.Must(template.New("plist").Parse(`<?xml version="1.0" e
 `))
 
 // GeneratePlist returns the launchd plist XML for the given binary path and config.
+// Returns an error if the schedule uses step, range, or list expressions in the
+// minute or hour fields — launchd requires plain integers in StartCalendarInterval.
 // Exported for testing.
-func GeneratePlist(binaryPath string, cfg *config.Config) string {
-	// Parse hour/minute from the cron schedule (field 1=minute, 2=hour)
+func GeneratePlist(binaryPath string, cfg *config.Config) (string, error) {
 	parts := strings.Fields(cfg.Backup.Schedule)
-	minute, hour := "0", "3"
-	if len(parts) >= 2 {
-		minute, hour = parts[0], parts[1]
+	if len(parts) != 5 {
+		return "", fmt.Errorf("schedule must have exactly 5 cron fields, got %d", len(parts))
+	}
+	minute, hour := parts[0], parts[1]
+	if !isSimpleInt(minute) || !isSimpleInt(hour) {
+		return "", fmt.Errorf(
+			"launchd scheduling only supports simple hour/minute values (e.g. \"0 3 * * *\"); "+
+				"step/range/list expressions like %q are not supported — use a specific time",
+			cfg.Backup.Schedule,
+		)
 	}
 
 	var buf strings.Builder
-	_ = plistTmpl.Execute(&buf, map[string]string{
+	if err := plistTmpl.Execute(&buf, map[string]string{
 		"Label":      plistLabel,
 		"BinaryPath": binaryPath,
 		"Hour":       hour,
 		"Minute":     minute,
 		"LogPath":    cfg.Daemon.LogPath,
-	})
-	return buf.String()
+	}); err != nil {
+		return "", fmt.Errorf("render plist template: %w", err)
+	}
+	return buf.String(), nil
 }
 
 func plistPath() string {
@@ -77,7 +88,10 @@ func (m *launchdManager) Install(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("find executable: %w", err)
 	}
-	plist := GeneratePlist(bin, cfg)
+	plist, err := GeneratePlist(bin, cfg)
+	if err != nil {
+		return fmt.Errorf("generate plist: %w", err)
+	}
 	path := plistPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return fmt.Errorf("create LaunchAgents dir: %w", err)
