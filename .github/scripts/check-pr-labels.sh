@@ -5,7 +5,7 @@ LABELS="$1"
 REQUIRED_LABELS="dependency feature fix maintenance release"
 
 for label in $REQUIRED_LABELS; do
-  if echo "$LABELS" | grep -qw "$label"; then
+  if echo "$LABELS" | grep -qwi "$label"; then
     exit 0
   fi
 done

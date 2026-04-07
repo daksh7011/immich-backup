@@ -5,7 +5,7 @@ LABELS="$1"
 VERSION_LABELS="major minor patch"
 
 for label in $VERSION_LABELS; do
-  if echo "$LABELS" | grep -qw "$label"; then
+  if echo "$LABELS" | grep -qwi "$label"; then
     exit 0
   fi
 done
