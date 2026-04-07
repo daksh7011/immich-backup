@@ -1,7 +1,7 @@
 // internal/tui/model.go
 package tui
 
-import tea "github.com/charmbracelet/bubbletea"
+import tea "charm.land/bubbletea/v2"
 
 // WaitForChan returns a tea.Cmd that reads one message from ch and dispatches it.
 func WaitForChan(ch <-chan any) tea.Cmd {

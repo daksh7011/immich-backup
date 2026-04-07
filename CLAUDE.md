@@ -29,3 +29,6 @@ Go CLI tool for backing up Immich (self-hosted photo server) using rclone.
 
 ## Commands
 setup, configure, backup, status, doctor, logs, daemon (install/uninstall/start/stop/restart/status/logs)
+
+## Commit style
+Do not add `Co-Authored-By` trailers to commits. Never add Claude or any AI tool as a collaborator in git commits.

@@ -4,14 +4,8 @@ package tui
 import (
 	"fmt"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
 	"github.com/daksh7011/immich-backup/internal/backup"
-)
-
-var (
-	okStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
-	errStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
 )
 
 // BackupModel is the Bubble Tea model for live backup progress display.
@@ -46,19 +40,33 @@ func (m BackupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case backup.DoneMsg:
 		m.done = true
 		return m, tea.Quit
+	case tea.KeyMsg:
+		if v.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
 	}
 	return m, nil
 }
 
-func (m BackupModel) View() string {
-	out := ""
+func (m BackupModel) View() tea.View {
+	out := renderHeader("  Backup Progress  ")
+
+	arrow := progressStyle.Render("→")
 	for _, l := range m.lines {
-		out += l + "\n"
+		out += " " + arrow + " " + dimStyle.Render(l) + "\n"
 	}
+
 	if m.lastErr != nil {
-		out += errStyle.Render(fmt.Sprintf("Error: %v", m.lastErr)) + "\n"
+		out += " " + errStyle.Render("✗") + " " + errStyle.Render(fmt.Sprintf("Error: %v", m.lastErr)) + "\n"
 	} else if m.done {
-		out += okStyle.Render("Backup complete!") + "\n"
+		out += " " + okStyle.Render("✓") + " " + okStyle.Render("Backup complete!") + "\n"
 	}
-	return out
+
+	if !m.done {
+		out += renderHints([]Hint{{"ctrl+c", "abort"}})
+	} else {
+		out += renderHints([]Hint{{"q / enter", "quit"}})
+	}
+
+	return tea.NewView(out)
 }

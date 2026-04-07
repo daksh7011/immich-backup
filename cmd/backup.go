@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
 	"github.com/daksh7011/immich-backup/internal/backup"
 	"github.com/daksh7011/immich-backup/internal/config"
