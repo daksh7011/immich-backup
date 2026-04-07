@@ -21,19 +21,14 @@ func TestEnsureConfigured_AlreadyConfigured(t *testing.T) {
 	}
 }
 
-func TestEnsureConfigured_EmptyFileIsNotInteractive(t *testing.T) {
-	// In CI / non-TTY, an empty rclone.conf means EnsureConfigured will attempt
-	// to launch rclone config. Since there is no TTY it will exit immediately,
-	// and EnsureConfigured must return an error (no remotes after launch).
-	// This test verifies the post-launch check fires, not the interactive UX.
+func TestEnsureConfigured_EmptyFile(t *testing.T) {
+	// EnsureConfigured is now a pure validator: it must return an error
+	// immediately when the config has no remotes, without launching rclone.
 	path := filepath.Join(t.TempDir(), "rclone.conf")
 	if err := os.WriteFile(path, []byte(""), 0600); err != nil {
 		t.Fatalf("write empty config: %v", err)
 	}
-	err := rcloneconf.EnsureConfigured(path)
-	// In CI / non-TTY environments rclone config exits immediately, leaving
-	// no remotes. We require an error to prove the post-launch guard fired.
-	if err == nil {
-		t.Fatal("expected error for empty config with no TTY, got nil")
+	if err := rcloneconf.EnsureConfigured(path); err == nil {
+		t.Fatal("expected error for empty config, got nil")
 	}
 }
