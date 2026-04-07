@@ -62,4 +62,6 @@ func (m SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m SetupModel) View() tea.View { return tea.NewView(m.form.View()) }
+func (m SetupModel) View() tea.View {
+	return tea.NewView(renderHeader("  Setup  ") + m.form.View())
+}
