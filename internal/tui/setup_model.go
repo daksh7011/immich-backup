@@ -2,8 +2,8 @@
 package tui
 
 import (
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/huh"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/huh/v2"
 	"github.com/daksh7011/immich-backup/internal/config"
 )
 
@@ -62,4 +62,4 @@ func (m SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m SetupModel) View() string { return m.form.View() }
+func (m SetupModel) View() tea.View { return tea.NewView(m.form.View()) }

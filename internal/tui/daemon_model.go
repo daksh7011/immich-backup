@@ -4,7 +4,7 @@ package tui
 import (
 	"fmt"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 type DaemonModel struct {
@@ -18,9 +18,9 @@ func NewDaemonModel(message string, err error) DaemonModel {
 
 func (m DaemonModel) Init() tea.Cmd                           { return nil }
 func (m DaemonModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { return m, tea.Quit }
-func (m DaemonModel) View() string {
+func (m DaemonModel) View() tea.View {
 	if m.err != nil {
-		return errStyle.Render(fmt.Sprintf("Error: %v\n", m.err))
+		return tea.NewView(errStyle.Render(fmt.Sprintf("Error: %v\n", m.err)))
 	}
-	return okStyle.Render(m.message + "\n")
+	return tea.NewView(okStyle.Render(m.message + "\n"))
 }

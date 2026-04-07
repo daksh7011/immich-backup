@@ -4,7 +4,7 @@ package tui
 import (
 	"fmt"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/daksh7011/immich-backup/internal/doctor"
 )
 
@@ -16,7 +16,7 @@ func NewDoctorModel(results []doctor.CheckResult) DoctorModel {
 
 func (m DoctorModel) Init() tea.Cmd                           { return nil }
 func (m DoctorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { return m, tea.Quit }
-func (m DoctorModel) View() string {
+func (m DoctorModel) View() tea.View {
 	out := ""
 	for _, r := range m.results {
 		icon := okStyle.Render("✓")
@@ -28,5 +28,5 @@ func (m DoctorModel) View() string {
 			out += fmt.Sprintf("   → %s\n", r.Remedy)
 		}
 	}
-	return out
+	return tea.NewView(out)
 }

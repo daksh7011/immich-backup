@@ -4,8 +4,8 @@ package tui
 import (
 	"fmt"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/daksh7011/immich-backup/internal/backup"
 )
 
@@ -50,7 +50,7 @@ func (m BackupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m BackupModel) View() string {
+func (m BackupModel) View() tea.View {
 	out := ""
 	for _, l := range m.lines {
 		out += l + "\n"
@@ -60,5 +60,5 @@ func (m BackupModel) View() string {
 	} else if m.done {
 		out += okStyle.Render("Backup complete!") + "\n"
 	}
-	return out
+	return tea.NewView(out)
 }

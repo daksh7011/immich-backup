@@ -4,7 +4,7 @@ package cmd
 import (
 	"fmt"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
 	"github.com/daksh7011/immich-backup/internal/config"
 	"github.com/daksh7011/immich-backup/internal/status"
