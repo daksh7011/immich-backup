@@ -45,7 +45,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Check for required PR label
-        run: bash .github/scripts/check-pr-labels.sh "${{ join(github.event.pull_request.labels.*.name, ' ') }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          LABELS=$(gh pr view ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --json labels --jq '[.labels[].name] | join(" ")')
+          bash .github/scripts/check-pr-labels.sh "$LABELS"
 
   release-label-check:
     needs: build-ci
@@ -57,4 +61,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Check for release version label
-        run: bash .github/scripts/check-release-labels.sh "${{ join(github.event.pull_request.labels.*.name, ' ') }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          LABELS=$(gh pr view ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --json labels --jq '[.labels[].name] | join(" ")')
+          bash .github/scripts/check-release-labels.sh "$LABELS"
