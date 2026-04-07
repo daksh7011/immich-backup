@@ -27,6 +27,9 @@ jobs:
       - name: Labeler
         uses: actions/labeler@v6
 
+      - name: Install rclone
+        run: curl https://rclone.org/install.sh | sudo bash
+
       - name: Build
         run: go build ./...
 
