@@ -4,7 +4,6 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -15,13 +14,18 @@ import (
 //	-X github.com/daksh7011/immich-backup/cmd.Version=<tag>
 var Version = "dev"
 
-// logo is a compact 3-line block-art mark for immich-backup.
-const logo = " ╔══════╗\n ║  ib  ║\n ╚══════╝"
+// asciiArt spells out "IMMICH BACKUP" in ANSI Shadow block font.
+const asciiArt = ` ██╗███╗   ███╗███╗   ███╗██╗ ██████╗██╗  ██╗    ██████╗  █████╗  ██████╗██╗  ██╗██╗   ██╗██████╗
+ ██║████╗ ████║████╗ ████║██║██╔════╝██║  ██║    ██╔══██╗██╔══██╗██╔════╝██║ ██╔╝██║   ██║██╔══██╗
+ ██║██╔████╔██║██╔████╔██║██║██║     ███████║    ██████╔╝███████║██║     █████╔╝ ██║   ██║██████╔╝
+ ██║██║╚██╔╝██║██║╚██╔╝██║██║██║     ██╔══██║    ██╔══██╗██╔══██║██║     ██╔═██╗ ██║   ██║██╔═══╝
+ ██║██║ ╚═╝ ██║██║ ╚═╝ ██║██║╚██████╗██║  ██║    ██████╔╝██║  ██║╚██████╗██║  ██╗╚██████╔╝██║
+ ╚═╝╚═╝     ╚═╝╚═╝     ╚═╝╚═╝ ╚═════╝╚═╝  ╚═╝    ╚═════╝ ╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝ ╚═════╝ ╚═╝`
 
 var (
-	logoStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#CBA6F7")).Bold(true)
+	artStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#CBA6F7")).Bold(true)
 	nameStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#CBA6F7")).Bold(true)
-	versionStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#89B4FA"))
+	versionStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#89B4FA")).Bold(true)
 	subStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#6C7086"))
 	dirStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#A6ADC8"))
 	dotStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#45475A"))
@@ -50,23 +54,12 @@ func currentDir() string {
 }
 
 func printBanner() {
-	logoLines := strings.Split(logo, "\n")
-	dot := dotStyle.Render(" · ")
-
-	infoLines := []string{
-		nameStyle.Render("immich-backup") + dot + versionStyle.Render(versionLabel()),
-		subStyle.Render("rclone-powered backup for your Immich library"),
-		dirStyle.Render(filepath.ToSlash(currentDir())),
-	}
+	dot := dotStyle.Render("  ·  ")
 
 	fmt.Println()
-	for i, line := range logoLines {
-		left := logoStyle.Render(line)
-		if i < len(infoLines) {
-			fmt.Printf("%s   %s\n", left, infoLines[i])
-		} else {
-			fmt.Println(left)
-		}
-	}
+	fmt.Println(artStyle.Render(asciiArt))
+	fmt.Println()
+	fmt.Println("  " + nameStyle.Render("immich-backup") + dot + versionStyle.Render(versionLabel()) + dot + dirStyle.Render(currentDir()))
+	fmt.Println("  " + subStyle.Render("rclone-powered backup for your Immich library"))
 	fmt.Println()
 }
