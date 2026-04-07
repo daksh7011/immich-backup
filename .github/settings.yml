@@ -1,0 +1,46 @@
+_extends: ".github"
+repository:
+  # See https://developer.github.com/v3/repos/#edit for all available settings.
+
+  name: immich-backup
+
+  description: Go CLI tool for backing up Immich (self-hosted photo server) using rclone.
+
+  private: true
+
+  has_issues: true
+
+  has_wiki: false
+
+  has_downloads: true
+
+  default_branch: master
+
+  allow_squash_merge: true
+
+  allow_merge_commit: true
+
+  allow_rebase_merge: true
+
+# Labels: define labels for Issues and Pull Requests
+labels:
+  - name: bug
+    color: CC0000
+  - name: fix
+    color: D93F0B
+  - name: feature
+    color: 0E8A16
+  - name: ci
+    color: 1D76DB
+  - name: dependency
+    color: 1D76DB
+  - name: maintenance
+    color: 1D76DB
+  - name: major
+    color: FBCA04
+  - name: minor
+    color: FBCA04
+  - name: patch
+    color: FBCA04
+  - name: release
+    color: 0052CC

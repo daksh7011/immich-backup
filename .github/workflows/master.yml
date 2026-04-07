@@ -1,0 +1,26 @@
+name: Build Master & Publish Release
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  build-master:
+    permissions:
+      contents: write
+      pull-requests: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Release Drafter
+        id: release_drafter
+        uses: release-drafter/release-drafter@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set version to env
+        run: echo "VERSION=${{ steps.release_drafter.outputs.tag_name }}" >> $GITHUB_ENV
