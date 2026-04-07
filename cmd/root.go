@@ -58,6 +58,7 @@ var rootCmd = &cobra.Command{
 
 // Execute is the entry point called from main.go.
 func Execute() {
+	printBanner()
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
