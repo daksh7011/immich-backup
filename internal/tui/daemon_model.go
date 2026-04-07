@@ -4,7 +4,7 @@ package tui
 import (
 	"fmt"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 type DaemonModel struct {
@@ -16,11 +16,25 @@ func NewDaemonModel(message string, err error) DaemonModel {
 	return DaemonModel{message: message, err: err}
 }
 
-func (m DaemonModel) Init() tea.Cmd                           { return nil }
-func (m DaemonModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { return m, tea.Quit }
-func (m DaemonModel) View() string {
-	if m.err != nil {
-		return errStyle.Render(fmt.Sprintf("Error: %v\n", m.err))
+func (m DaemonModel) Init() tea.Cmd { return nil }
+
+func (m DaemonModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if k, ok := msg.(tea.KeyMsg); ok {
+		switch k.String() {
+		case "q", "esc", "ctrl+c", "enter":
+			return m, tea.Quit
+		}
 	}
-	return okStyle.Render(m.message + "\n")
+	return m, nil
+}
+
+func (m DaemonModel) View() tea.View {
+	out := renderHeader("  Daemon  ")
+	if m.err != nil {
+		out += "  " + errStyle.Render(fmt.Sprintf("✗  %v", m.err)) + "\n"
+	} else {
+		out += "  " + okStyle.Render("✓  "+m.message) + "\n"
+	}
+	out += renderHints([]Hint{{"q / esc / enter", "quit"}})
+	return tea.NewView(out)
 }

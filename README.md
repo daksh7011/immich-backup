@@ -23,8 +23,8 @@ A CLI tool for backing up your [Immich](https://immich.app/) media library and d
 ### Homebrew (macOS / Linux)
 
 ```bash
-# Coming soon
-brew install daksh7011/tap/immich-backup
+brew tap daksh7011/tap
+brew install immich-backup
 ```
 
 ### Manual
@@ -140,9 +140,10 @@ CGO_ENABLED=0 go build -o immich-backup .
 Cross-compilation:
 
 ```bash
-CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64  go build -o immich-backup-darwin-arm64  .
-CGO_ENABLED=0 GOOS=linux   GOARCH=amd64  go build -o immich-backup-linux-amd64   .
-CGO_ENABLED=0 GOOS=windows GOARCH=amd64  go build -o immich-backup-windows-amd64 .
+CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o immich-backup-darwin-arm64 .
+CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -o immich-backup-darwin-amd64 .
+CGO_ENABLED=0 GOOS=linux  GOARCH=arm64 go build -o immich-backup-linux-arm64  .
+CGO_ENABLED=0 GOOS=linux  GOARCH=amd64 go build -o immich-backup-linux-amd64  .
 ```
 
 ## License

@@ -6,7 +6,7 @@ repository:
 
   description: Go CLI tool for backing up Immich (self-hosted photo server) using rclone.
 
-  private: true
+  private: false
 
   has_issues: true
 
