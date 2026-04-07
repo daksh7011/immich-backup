@@ -1,26 +1,42 @@
 <!--
 SYNC IMPACT REPORT
 ==================
-Version change: [PLACEHOLDER] → 1.0.0 (initial ratification — all content new)
+Version change: 1.1.0 → 2.0.0 (MAJOR — NON-NEGOTIABLE Principle V redefined)
 
-Modified principles: N/A (first fill)
+Modified principles:
+  - V. "Rclone Configuration Is Read-Only" →
+       "Isolated Local Rclone Configuration"
+    Old: tool MUST NEVER create/modify/delete rclone remotes or config file.
+    New: tool owns ~/.immich-backup/rclone.conf; delegates config UX to
+         `rclone config`; NEVER touches the user's global rclone config.
 
-Added sections:
-  - Core Principles (I–VI, all new)
-  - Hard Constraints
-  - Development Workflow
-  - Governance
+Added sections: none
 
-Removed sections: N/A
+Removed sections: none
 
 Template propagation status:
-  - .specify/templates/plan-template.md   ✅ No structural changes needed; "Constitution Check"
-                                             section gates must reference the six principles below.
-  - .specify/templates/spec-template.md   ✅ No changes required; generic enough to remain as-is.
-  - .specify/templates/tasks-template.md  ✅ No changes required; phase structure is generic.
+  - .specify/templates/plan-template.md   ✅ No structural changes needed;
+                                             "Constitution Check" must reference
+                                             updated Principle V wording.
+  - .specify/templates/spec-template.md   ✅ No changes required.
+  - .specify/templates/tasks-template.md  ✅ No changes required.
+  - docs/superpowers/specs/
+      2026-04-06-immich-backup-skeleton-design.md
+                                          ⚠ PENDING — references constitution
+                                             v1.1.0 and states "Rclone
+                                             configuration is never created or
+                                             modified by this tool." Needs update
+                                             to reflect local rclone.conf +
+                                             pause-launch-resume pattern. Config
+                                             schema should add rclone config path.
 
 Follow-up TODOs:
-  - None; all fields resolved from user-supplied hard rules and today's date.
+  - Update skeleton design spec to v2.0.0 compliance:
+      (1) Add ~/.immich-backup/rclone.conf to directory structure and Hard Constraints.
+      (2) Add rclone_config_path field to Config struct (or document hardcoded path).
+      (3) Update doctor check to verify local rclone.conf has ≥1 remote configured.
+      (4) Document pause-launch-resume flow in Section 2 (data flow).
+      (5) Update constitution compliance bullet to reference v2.0.0.
 -->
 
 # immich-backup Constitution
@@ -39,14 +55,14 @@ dynamic dependencies is the only acceptable artifact.
 
 ### II. Rclone Remote Abstraction (NON-NEGOTIABLE)
 
-The tool MUST interact with rclone only through remote names that the user has already
-configured in their own rclone installation. It MUST NEVER pass provider-specific flags
+The tool MUST interact with rclone only through remote names configured in the tool's
+local rclone config (see Principle V). It MUST NEVER pass provider-specific flags
 (e.g., `--s3-access-key-id`, `--drive-client-id`) to rclone invocations. The rclone
 remote name is the sole coupling point between this tool and any storage backend.
 
 **Rationale**: Provider-specific flags create tight coupling to storage backends and
 duplicate configuration the user already manages in rclone. Any change to provider
-credentials or parameters must remain entirely outside this tool's scope.
+credentials or parameters must remain entirely outside this tool's invocation logic.
 
 ### III. Fail-Fast & Clear Observability (NON-NEGOTIABLE)
 
@@ -56,6 +72,7 @@ is unreachable:
 - rclone binary not found or not executable
 - Docker socket unreachable or permission denied
 - Immich Postgres container not running or not responding
+- Local rclone config (`~/.immich-backup/rclone.conf`) has no remotes configured
 
 Every failure MUST emit a structured, human-readable log line that names the dependency,
 describes the error, and suggests a remediation step. Silent failures and partial backups
@@ -75,16 +92,39 @@ to rclone for upload.
 inconsistent backup. `pg_dumpall` guarantees a consistent logical dump without
 requiring the database to be stopped.
 
-### V. Rclone Configuration Is Read-Only (NON-NEGOTIABLE)
+### V. Isolated Local Rclone Configuration (NON-NEGOTIABLE)
 
-The tool MUST NEVER create, modify, delete, or otherwise manage rclone remotes or
-its configuration file. It MUST operate only against remotes that already exist in
-the user's rclone configuration. If a referenced remote does not exist, the tool
-MUST fail with a clear error (see Principle III).
+The tool MUST maintain its own isolated rclone config at `~/.immich-backup/rclone.conf`.
+ALL rclone invocations MUST pass `--config ~/.immich-backup/rclone.conf` — the tool
+MUST NEVER read from or write to the user's global rclone config (typically
+`~/.config/rclone/rclone.conf`).
 
-**Rationale**: Modifying a shared tool's configuration on the user's behalf risks
-corrupting credentials for unrelated workflows. Configuration ownership belongs
-entirely to the user.
+**Missing or empty config — pause-launch-resume**:
+
+If `~/.immich-backup/rclone.conf` does not exist, or exists but contains no configured
+remotes, the tool MUST:
+
+1. Inform the user that no rclone remote is configured.
+2. Pause the current CLI flow.
+3. Launch `rclone config --config ~/.immich-backup/rclone.conf` as an interactive
+   subprocess, inheriting the terminal.
+4. Wait for `rclone config` to exit.
+5. Verify that at least one remote now exists in the local config. If not, the tool
+   MUST exit with a clear error (Principle III).
+6. Resume the original flow.
+
+**User-triggered reconfiguration**:
+
+When the user requests rclone settings changes (e.g., via `immich-backup configure`),
+the same pause-launch-resume pattern MUST be applied. The tool hands off to
+`rclone config --config ~/.immich-backup/rclone.conf`, waits for it to complete,
+then resumes.
+
+**Rationale**: An isolated config prevents corruption of the user's existing rclone
+remotes for unrelated workflows. Delegating configuration UX entirely to `rclone config`
+leverages rclone's battle-tested interactive configurator without reimplementing
+credential management logic. The pause-launch-resume pattern gives users a guided,
+in-flow path to add a remote without abandoning the immich-backup session.
 
 ### VI. Rootless Daemon Management
 
@@ -104,6 +144,10 @@ security surface and prevents installation in shared/restricted environments.
 - **Config file**: `~/.immich-backup/config.yaml`, parsed exclusively with
   `gopkg.in/yaml.v3` plain structs. No Viper, Cobra config binding, or embedded config
   languages.
+- **Rclone config file**: `~/.immich-backup/rclone.conf` — an isolated, tool-owned
+  rclone configuration. ALL rclone invocations MUST pass
+  `--config ~/.immich-backup/rclone.conf`. The user's global rclone config MUST NOT be
+  read or modified.
 - **Distribution targets**: macOS (Homebrew), Windows (Chocolatey), Linux (Homebrew
   or manual binary install). All platforms MUST be served by the same binary build matrix
   (`GOOS`/`GOARCH` cross-compilation).
@@ -116,11 +160,14 @@ security surface and prevents installation in shared/restricted environments.
 ## Development Workflow
 
 - All tests MUST run without CGo (`CGO_ENABLED=0 go test ./...`).
-- Integration tests that require a live Docker daemon or rclone MUST be gated behind a
-  build tag (e.g., `//go:build integration`) and MUST NOT run in the standard `go test`
-  suite.
+- All tests run against real infrastructure (testcontainers-go + real rclone binary).
+  No mocks, no fakes, no build tags. Docker and rclone are hard runtime prerequisites
+  for this project, so tests require them too. A plain `go test ./...` runs everything.
 - PRs touching backup or restore logic MUST include a Constitution Check confirming
   compliance with Principles III, IV, and V before merge.
+- PRs touching setup, configure, or rclone invocation MUST verify the
+  pause-launch-resume flow (Principle V) and that `--config ~/.immich-backup/rclone.conf`
+  is passed to every rclone call.
 - Complexity violations (e.g., adding a fourth external dependency type) MUST be
   documented in the plan's Complexity Tracking table with justification.
 
@@ -143,4 +190,4 @@ the `immich-backup` repository. Any amendment requires:
 All PRs and code reviews MUST verify compliance with the NON-NEGOTIABLE principles
 (I–V). Principle VI compliance is verified only for daemon-management changes.
 
-**Version**: 1.0.0 | **Ratified**: 2026-04-06 | **Last Amended**: 2026-04-06
+**Version**: 2.0.0 | **Ratified**: 2026-04-06 | **Last Amended**: 2026-04-06

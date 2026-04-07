@@ -1,0 +1,21 @@
+dependency:
+  - head-branch: ['^renovate']
+  - changed-files:
+      - any-glob-to-any-file: '**/go.mod'
+      - any-glob-to-any-file: '**/go.sum'
+
+ci:
+  - changed-files:
+      - any-glob-to-any-file: '.github/**/*'
+
+feature:
+  - head-branch: ['^feature', 'feature']
+
+fix:
+  - head-branch: ['^fix', 'fix']
+
+maintenance:
+  - head-branch: ['^maintenance', 'maintenance', '^chore', 'chore']
+
+release:
+  - base-branch: 'master'
