@@ -5,7 +5,7 @@
 
 ## Summary
 
-Enhance the `backup` command's TUI to show a live progress bar during media sync, including transfer speed, ETA, and file count. Uses rclone's JSON log output (`--use-json-log --stats 1s`) combined with a pre-scan (`rclone size --json`) to display accurate percentage from the start.
+Enhance the `backup` command's TUI to show a live progress bar during media sync, including transfer speed, ETA, and file count. Uses rclone's JSON log output (`--use-json-log --stats 1s`) combined with a pre-scan (`rclone size --json`) to display accurate percentage from the start. File-level I/O errors (e.g. unreadable source files) are captured, displayed in the TUI, and skipped via `--ignore-errors` so the rest of the backup continues.
 
 ---
 
@@ -27,7 +27,7 @@ backup.Run()
 
 ## New Message Types (`internal/backup/backup.go`)
 
-Three new message types added alongside existing `ProgressMsg`, `ErrorMsg`, `DoneMsg`:
+Four new message types added alongside existing `ProgressMsg`, `ErrorMsg`, `DoneMsg`:
 
 ```go
 // ScanMsg is sent after rclone size --json completes.
@@ -44,6 +44,12 @@ type MediaProgressMsg struct {
     ETA              *int64  // nil = not yet known (rclone emits null on first tick)
     FilesDone        int64
     FilesTotal       int64
+}
+
+// RcloneErrorMsg is sent when rclone reports a file-level error (level:"error" in JSON log).
+// These are non-fatal: the backup continues via --ignore-errors.
+type RcloneErrorMsg struct {
+    Text string // full error message from rclone
 }
 ```
 
@@ -84,10 +90,24 @@ type rcloneStats struct {
 }
 ```
 
-Filter: skip lines where `stats` is nil (non-stats log lines like `"Copied (new)"`).
-A private `parseRcloneStats(line []byte) (MediaProgressMsg, bool)` function handles unmarshalling and returns `false` for non-stats lines.
+The full log line struct also carries `Level` for error detection:
 
-The stderr pipe from `rclone sync` is read line-by-line via `bufio.Scanner` in a goroutine. Parsed `MediaProgressMsg` values are sent to the channel. rclone exit errors are caught by `cmd.Wait()` and sent as `ErrorMsg`.
+```go
+type rcloneLogLine struct {
+    Level string       `json:"level"`
+    Msg   string       `json:"msg"`
+    Stats *rcloneStats `json:"stats"`
+}
+```
+
+Parsing rules (applied per line):
+1. If `stats != nil` → emit `MediaProgressMsg`
+2. Else if `level == "error"` → emit `RcloneErrorMsg{Text: msg}`
+3. Otherwise → skip
+
+A private `parseRcloneLine(line []byte) (any, bool)` function handles unmarshalling and returns the appropriate message type or `(nil, false)` to skip.
+
+The stderr pipe from `rclone sync` is read line-by-line via `bufio.Scanner` in a goroutine. `--ignore-errors` is added to the rclone sync flags so file-level errors don't abort the run. rclone will exit non-zero if any files failed; `cmd.Wait()` is treated as a warning (not a fatal `ErrorMsg`) when `rcloneErrors` were already collected — a clean exit (no errors collected) sends `DoneMsg` normally.
 
 ---
 
@@ -99,7 +119,7 @@ The stderr pipe from `rclone sync` is read line-by-line via `bufio.Scanner` in a
 |-------|---------|---------|
 | Scan | `ScanMsg` received | Pulse/indeterminate `bubbles/progress` bar + `"Scanning library..."` |
 | Sync | First `MediaProgressMsg` | Determinate bar at `transferredBytes / totalBytes` + stats row |
-| Done | `DoneMsg` | Final bar at 100% + `"✓ Backup complete!"` |
+| Done | `DoneMsg` | Final bar at 100% + completion message (see below) |
 
 ### Sync phase layout
 
@@ -116,6 +136,23 @@ The stderr pipe from `rclone sync` is read line-by-line via `bufio.Scanner` in a
 ```
 
 When ETA is nil: render `"calculating..."` instead of the time.
+
+### Error display and completion messages
+
+File-level errors from `RcloneErrorMsg` accumulate in `rcloneErrors []string` and render below the progress bar in `errStyle` (red) as they arrive:
+
+```
+  [████████████████████████] 100%
+  52.4 MB/s  │  done  │  2,950 / 2,950 files
+
+  ✗ 2025/10-Dec-2025/20251210_163454.mp4: Failed to copy: input/output error
+  ✗ 2025/11-Nov-2025/20251105_091200.jpg: Failed to copy: input/output error
+
+  ✓ Backup complete with 2 file error(s).
+```
+
+Clean run (no errors): `✓ Backup complete!` in `okStyle`.
+Partial run (errors collected): `✓ Backup complete with N file error(s).` in `warnStyle`.
 
 ### Styling
 
@@ -136,11 +173,12 @@ type BackupModel struct {
     lastErr error
 
     // new
-    progress    progress.Model // bubbles progress bar
-    scanning    bool
-    totalBytes  int64
-    totalFiles  int64
-    mediaProg   *MediaProgressMsg // nil until first tick
+    progress      progress.Model    // bubbles progress bar
+    scanning      bool
+    totalBytes    int64
+    totalFiles    int64
+    mediaProg     *MediaProgressMsg // nil until first tick
+    rcloneErrors  []string          // accumulated file-level errors
 }
 ```
 
