@@ -3,6 +3,7 @@ package backup
 
 import (
 	"compress/gzip"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,6 +20,53 @@ import (
 type ProgressMsg struct{ Text string }
 type ErrorMsg struct{ Err error }
 type DoneMsg struct{}
+
+// ScanMsg is sent after rclone size --json completes.
+type ScanMsg struct {
+	TotalFiles int64
+	TotalBytes int64
+}
+
+// MediaProgressMsg is sent each stats tick during rclone sync.
+type MediaProgressMsg struct {
+	TransferredBytes int64
+	TotalBytes       int64
+	Speed            float64 // bytes/sec; 0 on first tick
+	ETA              *int64  // nil = not yet known (rclone emits null on first tick)
+	FilesDone        int64
+	FilesTotal       int64
+}
+
+// RcloneErrorMsg is sent when rclone reports a file-level error.
+// Non-fatal: backup continues because RunMedia uses --ignore-errors.
+type RcloneErrorMsg struct {
+	Text string
+}
+
+// Private JSON structs used only inside this package.
+type rcloneSizeResult struct {
+	Count    int64 `json:"count"`
+	Bytes    int64 `json:"bytes"`
+	Sizeless int64 `json:"sizeless"`
+}
+
+type rcloneLogLine struct {
+	Level string       `json:"level"`
+	Msg   string       `json:"msg"`
+	Stats *rcloneStats `json:"stats"`
+}
+
+type rcloneStats struct {
+	Bytes          int64   `json:"bytes"`
+	TotalBytes     int64   `json:"totalBytes"`
+	Speed          float64 `json:"speed"`
+	ETA            *int64  `json:"eta"`
+	Transfers      int64   `json:"transfers"`
+	TotalTransfers int64   `json:"totalTransfers"`
+}
+
+// Used by parseRcloneLine (Task 2); added here in Task 1 with structs.
+var _ = json.Unmarshal
 
 // Runner orchestrates database and media backup operations.
 type Runner interface {
