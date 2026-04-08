@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -15,35 +16,45 @@ import (
 // BackupModel is the Bubble Tea model for live backup progress display.
 type BackupModel struct {
 	ch      <-chan any
+	cancel  context.CancelFunc
 	lines   []string
 	done    bool
 	lastErr error
 
 	// progress tracking
-	progress     progress.Model
-	spinner      spinner.Model
-	scanning     bool
-	totalBytes   int64
-	mediaProg    *backup.MediaProgressMsg
-	rcloneErrors []string
+	progress      progress.Model
+	dbProgress    progress.Model
+	spinner       spinner.Model
+	scanning      bool
+	totalBytes    int64
+	dbUploadProg  *backup.DBUploadProgressMsg
+	mediaProg     *backup.MediaProgressMsg
+	rcloneErrors  []string
 }
 
 // NewBackupModel creates a BackupModel that reads from ch.
-func NewBackupModel(ch <-chan any) BackupModel {
-	p := progress.New(
-		progress.WithColors(lipgloss.Color("#CBA6F7")), // colorMauve
-		progress.WithoutPercentage(), // we render percentage ourselves in the stats row
-	)
-	p.SetWidth(48)
+// cancel is called when the user aborts (Ctrl+C); it must cancel the context
+// passed to backup.Run so the rclone subprocess is killed.
+func NewBackupModel(ch <-chan any, cancel context.CancelFunc) BackupModel {
+	newBar := func() progress.Model {
+		p := progress.New(
+			progress.WithColors(lipgloss.Color("#CBA6F7")), // colorMauve
+			progress.WithoutPercentage(),
+		)
+		p.SetWidth(48)
+		return p
+	}
 
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#CBA6F7"))
 
 	return BackupModel{
-		ch:       ch,
-		progress: p,
-		spinner:  s,
+		ch:         ch,
+		cancel:     cancel,
+		progress:   newBar(),
+		dbProgress: newBar(),
+		spinner:    s,
 	}
 }
 
@@ -56,6 +67,10 @@ func (m BackupModel) Init() tea.Cmd {
 
 func (m BackupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch v := msg.(type) {
+
+	case backup.DBUploadProgressMsg:
+		m.dbUploadProg = &v
+		return m, WaitForChan(m.ch)
 
 	case backup.ScanMsg:
 		m.scanning = true
@@ -79,12 +94,12 @@ func (m BackupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.scanning = false
 		m.lastErr = v.Err
 		m.done = true
-		return m, tea.Quit
+		return m, nil
 
 	case backup.DoneMsg:
 		m.scanning = false
 		m.done = true
-		return m, tea.Quit
+		return m, nil
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -92,7 +107,17 @@ func (m BackupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case tea.KeyMsg:
+		if m.done {
+			switch v.String() {
+			case "q", "enter", "esc", "ctrl+c":
+				return m, tea.Quit
+			}
+			return m, nil
+		}
 		if v.String() == "ctrl+c" {
+			if m.cancel != nil {
+				m.cancel()
+			}
 			return m, tea.Quit
 		}
 	}
@@ -108,7 +133,13 @@ func (m BackupModel) View() tea.View {
 		out += " " + arrow + " " + dimStyle.Render(l) + "\n"
 	}
 
-	// Progress section (only shown once scanning or syncing has started)
+	// DB upload progress (shown once RunDBUpload sends its first tick)
+	if m.dbUploadProg != nil {
+		out += "\n"
+		out += m.renderDBUploadSection()
+	}
+
+	// Media progress section (scanning spinner or sync progress bar)
 	if m.scanning || m.mediaProg != nil || (m.done && m.totalBytes > 0) {
 		out += "\n"
 		out += m.renderProgressSection()
@@ -141,6 +172,32 @@ func (m BackupModel) View() tea.View {
 	}
 
 	return tea.NewView(out)
+}
+
+func (m BackupModel) renderDBUploadSection() string {
+	p := m.dbUploadProg
+	out := " " + dimStyle.Render("DB dump upload") + "\n"
+
+	pct := 0.0
+	if p.TotalBytes > 0 {
+		pct = float64(p.TransferredBytes) / float64(p.TotalBytes)
+		if pct > 1.0 {
+			pct = 1.0
+		}
+	}
+	// Clamp to 100% when backup is done (final tick may not reach exactly 1.0)
+	if m.done && m.mediaProg != nil {
+		pct = 1.0
+	}
+	pctLabel := fmt.Sprintf(" %3.0f%%", pct*100)
+	out += " " + m.dbProgress.ViewAs(pct) + dimStyle.Render(pctLabel) + "\n"
+
+	speed := formatSpeed(p.Speed)
+	eta := formatETA(p.ETA)
+	sep := sepStyle.Render("  │  ")
+	out += " " + dimStyle.Render(speed) + sep + dimStyle.Render(eta) + "\n"
+
+	return out
 }
 
 func (m BackupModel) renderProgressSection() string {
