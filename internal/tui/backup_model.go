@@ -141,6 +141,13 @@ func (m BackupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.done = true
 		return m, nil
 
+	case chanClosedMsg:
+		// Channel closed without DoneMsg — backup was cancelled (ctx cancel).
+		// Mark whatever was running as aborted and exit.
+		m.markRunningError("aborted")
+		m.done = true
+		return m, tea.Quit
+
 	case spinner.TickMsg:
 		if !m.done {
 			var cmd tea.Cmd

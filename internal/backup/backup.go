@@ -330,12 +330,12 @@ func Run(
 	logWriter io.Writer,
 	ch chan<- any,
 ) {
-	send := func(msg any) {
-		select {
-		case ch <- msg:
-		default:
-		}
-	}
+	// send is a blocking send used for phase transitions and terminal messages
+	// (PhaseMsg, ErrorMsg, DoneMsg). These must not be dropped — losing a terminal
+	// message leaves the TUI frozen. Progress-tick messages (DBUploadProgressMsg,
+	// MediaProgressMsg) use the non-blocking sendMsg helper in their respective
+	// Run* methods and are safe to drop under backpressure.
+	send := func(msg any) { ch <- msg }
 
 	if logWriter == nil {
 		logWriter = io.Discard
