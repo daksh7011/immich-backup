@@ -16,3 +16,4 @@ func DefaultConfigPath() string { return filepath.Join(AppDir(), "config.yaml") 
 func RcloneConfigPath() string  { return filepath.Join(AppDir(), "rclone.conf") }
 func StatusFilePath() string    { return filepath.Join(AppDir(), "last-run.json") }
 func DefaultLogPath() string    { return filepath.Join(AppDir(), "logs", "daemon.log") }
+func RcloneLogPath() string     { return filepath.Join(AppDir(), "logs", "rclone.log") }

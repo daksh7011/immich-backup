@@ -54,8 +54,11 @@ func (m SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	form, cmd := m.form.Update(msg)
 	if f, ok := form.(*huh.Form); ok {
 		m.form = f
-		if m.form.State == huh.StateCompleted {
+		switch m.form.State {
+		case huh.StateCompleted:
 			m.done = true
+			return m, tea.Quit
+		case huh.StateAborted:
 			return m, tea.Quit
 		}
 	}

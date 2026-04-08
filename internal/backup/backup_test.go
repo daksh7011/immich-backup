@@ -64,7 +64,7 @@ func TestRunDatabase_ProducesDump(t *testing.T) {
 	_ = os.WriteFile(confPath, []byte("[local]\ntype = local\n"), 0600)
 
 	destPath := filepath.Join(t.TempDir(), "dump.sql.gz")
-	r := backup.New(newDockerClient(t), confPath)
+	r := backup.New(newDockerClient(t), confPath, nil)
 	if err := r.RunDatabase(name, "postgres", destPath); err != nil {
 		t.Fatalf("RunDatabase: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestRun_HappyPath(t *testing.T) {
 	confPath, remote := localRcloneConf(t, "rundst")
 
 	ch := make(chan any, 20)
-	go backup.Run(confPath, pgName, "postgres", srcDir, remote, newDockerClient(t), ch)
+	go backup.Run(context.Background(), confPath, pgName, "postgres", srcDir, remote, newDockerClient(t), false, false, nil, ch)
 	msgs := collectChan(ch)
 
 	if len(msgs) == 0 {
@@ -161,7 +161,7 @@ func TestRun_DatabaseFailure_StopsEarlyAndClosesChannel(t *testing.T) {
 
 	ch := make(chan any, 20)
 	// Non-existent container forces an immediate database failure.
-	go backup.Run(confPath, "nonexistent-container-xyzxyz", "postgres", t.TempDir(), remote, newDockerClient(t), ch)
+	go backup.Run(context.Background(), confPath, "nonexistent-container-xyzxyz", "postgres", t.TempDir(), remote, newDockerClient(t), false, false, nil, ch)
 	msgs := collectChan(ch)
 
 	hasError := false
@@ -198,9 +198,9 @@ func TestRunMedia_SyncsFiles(t *testing.T) {
 	}
 
 	ch := make(chan any, 50)
-	r := backup.New(newDockerClient(t), confPath)
+	r := backup.New(newDockerClient(t), confPath, nil)
 	remote := "testdst:" + dstDir
-	if err := r.RunMedia(remote, srcDir, ch); err != nil {
+	if err := r.RunMedia(context.Background(), remote, srcDir, ch); err != nil {
 		t.Fatalf("RunMedia: %v", err)
 	}
 	close(ch)

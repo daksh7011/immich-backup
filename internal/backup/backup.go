@@ -4,13 +4,13 @@ package backup
 import (
 	"bufio"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/daksh7011/immich-backup/internal/docker"
@@ -37,6 +37,14 @@ type MediaProgressMsg struct {
 	ETA              *int64  // nil = not yet known (rclone emits null on first tick)
 	FilesDone        int64
 	FilesTotal       int64
+}
+
+// DBUploadProgressMsg is sent each stats tick while uploading the database dump.
+type DBUploadProgressMsg struct {
+	TransferredBytes int64
+	TotalBytes       int64
+	Speed            float64
+	ETA              *int64
 }
 
 // RcloneErrorMsg is sent when rclone reports a file-level error.
@@ -105,23 +113,30 @@ func sendMsg(ch chan<- any, msg any) {
 
 // Runner orchestrates database and media backup operations.
 type Runner interface {
-	RunMedia(remote, srcDir string, ch chan<- any) error
 	RunDatabase(container, pgUser, destPath string) error
+	RunDBUpload(ctx context.Context, dumpPath, remoteDir string, ch chan<- any) error
+	RunMedia(ctx context.Context, remote, srcDir string, ch chan<- any) error
 }
 
 // BackupRunner is the production implementation of Runner.
 type BackupRunner struct {
 	exec       docker.Executor
-	rcloneConf string // path to --config file for all rclone calls
+	rcloneConf string    // path to --config file for all rclone calls
+	logWriter  io.Writer // receives raw rclone stderr lines; io.Discard if nil
 }
 
 // New returns a BackupRunner. rcloneConf must be the path to the isolated
 // rclone config (constitution Principle V). Panics if empty.
-func New(exec docker.Executor, rcloneConf string) Runner {
+// logWriter receives every raw rclone log line for persistent storage; pass
+// nil to discard (e.g. in tests).
+func New(exec docker.Executor, rcloneConf string, logWriter io.Writer) Runner {
 	if rcloneConf == "" {
 		panic("backup.New: rcloneConf must not be empty (constitution Principle V)")
 	}
-	return &BackupRunner{exec: exec, rcloneConf: rcloneConf}
+	if logWriter == nil {
+		logWriter = io.Discard
+	}
+	return &BackupRunner{exec: exec, rcloneConf: rcloneConf, logWriter: logWriter}
 }
 
 // RunDatabase dumps all databases from the Postgres container via pg_dumpall,
@@ -153,12 +168,79 @@ func (r *BackupRunner) RunDatabase(container, pgUser, destPath string) error {
 	return nil
 }
 
+// RunDBUpload copies dumpPath to remoteDir using rclone copy with JSON log
+// streaming. DBUploadProgressMsg ticks are sent to ch on each stats line.
+// If ctx is cancelled the rclone subprocess is killed immediately.
+func (r *BackupRunner) RunDBUpload(ctx context.Context, dumpPath, remoteDir string, ch chan<- any) error {
+	info, err := os.Stat(dumpPath)
+	if err != nil {
+		return fmt.Errorf("stat dump file: %w", err)
+	}
+	totalBytes := info.Size()
+	// Send an initial tick so the TUI can show the bar at 0% immediately.
+	sendMsg(ch, DBUploadProgressMsg{TotalBytes: totalBytes})
+
+	args := []string{
+		"--config", r.rcloneConf,
+		"copy", dumpPath, remoteDir,
+		"--use-json-log", "--stats", "1s", "--log-level", "DEBUG",
+	}
+	cmd := exec.CommandContext(ctx, "rclone", args...)
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("rclone stderr pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("rclone copy start: %w", err)
+	}
+
+	scanner := bufio.NewScanner(stderr)
+	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		_, _ = r.logWriter.Write(append(line, '\n'))
+
+		var entry rcloneLogLine
+		if err := json.Unmarshal(line, &entry); err != nil {
+			continue
+		}
+		if entry.Stats == nil {
+			continue
+		}
+		tb := entry.Stats.TotalBytes
+		if tb == 0 {
+			tb = totalBytes // use file size when rclone hasn't computed it yet
+		}
+		sendMsg(ch, DBUploadProgressMsg{
+			TransferredBytes: entry.Stats.Bytes,
+			TotalBytes:       tb,
+			Speed:            entry.Stats.Speed,
+			ETA:              entry.Stats.ETA,
+		})
+	}
+
+	if err := scanner.Err(); err != nil {
+		_, _ = io.Copy(io.Discard, stderr)
+		_ = cmd.Wait()
+		return fmt.Errorf("rclone stderr read: %w", err)
+	}
+
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("rclone copy: %w", err)
+	}
+	return nil
+}
+
 // RunMedia pre-scans srcDir with rclone size, then syncs srcDir to remote
 // using rclone sync with JSON logging. Progress and file-level errors are sent
 // to ch. ch may be nil (progress is silently discarded).
-func (r *BackupRunner) RunMedia(remote, srcDir string, ch chan<- any) error {
+// If ctx is cancelled the rclone subprocess is killed immediately.
+func (r *BackupRunner) RunMedia(ctx context.Context, remote, srcDir string, ch chan<- any) error {
 	// Phase 1: pre-scan to get total file count and bytes.
-	sizeOut, err := exec.Command("rclone", "--config", r.rcloneConf, "size", srcDir, "--json").Output()
+	sizeCmd := exec.CommandContext(ctx, "rclone", "--config", r.rcloneConf, "size", srcDir, "--json")
+	sizeCmd.Stderr = r.logWriter
+	sizeOut, err := sizeCmd.Output()
 	if err != nil {
 		return fmt.Errorf("rclone size: %w", err)
 	}
@@ -172,10 +254,10 @@ func (r *BackupRunner) RunMedia(remote, srcDir string, ch chan<- any) error {
 	args := []string{
 		"--config", r.rcloneConf,
 		"sync", srcDir, remote,
-		"--use-json-log", "--stats", "1s", "--log-level", "INFO",
+		"--use-json-log", "--stats", "1s", "--log-level", "DEBUG",
 		"--ignore-errors",
 	}
-	cmd := exec.Command("rclone", args...)
+	cmd := exec.CommandContext(ctx, "rclone", args...)
 
 	// cmd.Stdout is intentionally not set: rclone writes nothing meaningful to
 	// stdout when --use-json-log is active, so we let it go to /dev/null.
@@ -191,7 +273,10 @@ func (r *BackupRunner) RunMedia(remote, srcDir string, ch chan<- any) error {
 	scanner := bufio.NewScanner(stderr)
 	scanner.Buffer(make([]byte, 256*1024), 256*1024)
 	for scanner.Scan() {
-		msg, ok := ParseRcloneLine(scanner.Bytes())
+		line := scanner.Bytes()
+		_, _ = r.logWriter.Write(append(line, '\n'))
+
+		msg, ok := ParseRcloneLine(line)
 		if !ok {
 			continue
 		}
@@ -220,9 +305,15 @@ func (r *BackupRunner) RunMedia(remote, srcDir string, ch chan<- any) error {
 
 // Run orchestrates a full backup: database dump → upload dump → media sync.
 // Progress, errors, and completion are sent to ch for live TUI display.
+// If ctx is cancelled in-flight, the active rclone subprocess is killed and
+// the channel is closed without sending DoneMsg.
+// skipDB skips the database dump+upload; skipMedia skips the rclone media sync.
 func Run(
+	ctx context.Context,
 	rcloneConf, container, pgUser, uploadLocation, rcloneRemote string,
 	executor docker.Executor,
+	skipDB, skipMedia bool,
+	logWriter io.Writer,
 	ch chan<- any,
 ) {
 	send := func(msg any) {
@@ -232,34 +323,52 @@ func Run(
 		}
 	}
 
-	r := New(executor, rcloneConf)
+	if logWriter == nil {
+		logWriter = io.Discard
+	}
+	_, _ = fmt.Fprintf(logWriter, "\n--- backup run %s ---\n", time.Now().UTC().Format(time.RFC3339))
 
-	send(ProgressMsg{Text: "Starting database backup..."})
-	dumpPath := filepath.Join(os.TempDir(),
-		fmt.Sprintf("immich-db-%s.sql.gz", time.Now().Format("20060102-150405")))
-	if err := r.RunDatabase(container, pgUser, dumpPath); err != nil {
-		send(ErrorMsg{Err: fmt.Errorf("database backup: %w", err)})
-		close(ch)
-		return
+	r := New(executor, rcloneConf, logWriter)
+
+	if !skipDB {
+		send(ProgressMsg{Text: "Starting database backup..."})
+		dumpPath := filepath.Join(os.TempDir(),
+			fmt.Sprintf("immich-db-%s.sql.gz", time.Now().Format("20060102-150405")))
+		if err := r.RunDatabase(container, pgUser, dumpPath); err != nil {
+			send(ErrorMsg{Err: fmt.Errorf("database backup: %w", err)})
+			close(ch)
+			return
+		}
+
+		send(ProgressMsg{Text: "Uploading database dump to remote..."})
+		remoteDBDir := rcloneRemote + "/db"
+		uploadErr := r.RunDBUpload(ctx, dumpPath, remoteDBDir, ch)
+		_ = os.Remove(dumpPath) // best-effort; uploaded or failed, temp file is no longer needed
+		if uploadErr != nil {
+			if ctx.Err() != nil {
+				close(ch)
+				return
+			}
+			send(ErrorMsg{Err: fmt.Errorf("upload database dump: %w", uploadErr)})
+			close(ch)
+			return
+		}
 	}
 
-	send(ProgressMsg{Text: "Uploading database dump to remote..."})
-	remoteDBDir := rcloneRemote + "/db"
-	uploadOut, uploadErr := exec.Command("rclone", "--config", rcloneConf, "copy", dumpPath, remoteDBDir).CombinedOutput()
-	_ = os.Remove(dumpPath) // best-effort; uploaded or failed, temp file is no longer needed
-	if uploadErr != nil {
-		send(ErrorMsg{Err: fmt.Errorf("upload database dump: %w: %s", uploadErr, strings.TrimSpace(string(uploadOut)))})
-		close(ch)
-		return
+	if !skipMedia {
+		send(ProgressMsg{Text: "Starting media sync..."})
+		if err := r.RunMedia(ctx, rcloneRemote, uploadLocation, ch); err != nil {
+			if ctx.Err() != nil {
+				close(ch)
+				return
+			}
+			send(ErrorMsg{Err: fmt.Errorf("media sync: %w", err)})
+			close(ch)
+			return
+		}
+		send(ProgressMsg{Text: "Media sync complete."})
 	}
 
-	send(ProgressMsg{Text: "Database dump uploaded. Starting media sync..."})
-	if err := r.RunMedia(rcloneRemote, uploadLocation, ch); err != nil {
-		send(ErrorMsg{Err: fmt.Errorf("media sync: %w", err)})
-		close(ch)
-		return
-	}
-	send(ProgressMsg{Text: "Media sync complete."})
 	send(DoneMsg{})
 	close(ch)
 }

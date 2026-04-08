@@ -2,9 +2,12 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -18,7 +21,7 @@ import (
 )
 
 func newBackupCmd() *cobra.Command {
-	return &cobra.Command{
+	c := &cobra.Command{
 		Use:   "backup",
 		Short: "Run a backup now",
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -44,19 +47,32 @@ func newBackupCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			// Start live TUI + backup runner concurrently
+			// Start live TUI + backup runner concurrently.
+			// ctx is cancelled when the user presses Ctrl+C, which kills rclone.
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			skipDB, _ := cmd.Flags().GetBool("skip-db")
+			skipMedia, _ := cmd.Flags().GetBool("skip-media")
+
+			logFile := openRcloneLog(config.RcloneLogPath())
+			defer logFile.Close()
+
 			ch := make(chan any, 16)
 			go backup.Run(
+				ctx,
 				config.RcloneConfigPath(),
 				cfg.Immich.PostgresContainer,
 				cfg.Immich.PostgresUser,
 				cfg.Immich.UploadLocation,
 				cfg.Backup.RcloneRemote,
 				client,
+				skipDB, skipMedia,
+				logFile,
 				ch,
 			)
 
-			model := tui.NewBackupModel(ch)
+			model := tui.NewBackupModel(ch, cancel)
 			p := tea.NewProgram(model)
 			result, err := p.Run()
 			if err != nil {
@@ -75,4 +91,25 @@ func newBackupCmd() *cobra.Command {
 			return nil
 		},
 	}
+	c.Flags().Bool("skip-db", false, "Skip database dump and upload")
+	c.Flags().Bool("skip-media", false, "Skip media sync")
+	return c
 }
+
+// openRcloneLog opens the rclone log file in append mode, creating it (and
+// parent dirs) if necessary. On any error it returns io.Discard so the caller
+// always gets a valid writer.
+func openRcloneLog(path string) io.WriteCloser {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return nopCloser{io.Discard}
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return nopCloser{io.Discard}
+	}
+	return f
+}
+
+type nopCloser struct{ io.Writer }
+
+func (nopCloser) Close() error { return nil }
