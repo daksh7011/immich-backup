@@ -24,7 +24,6 @@ type BackupModel struct {
 	spinner      spinner.Model
 	scanning     bool
 	totalBytes   int64
-	totalFiles   int64
 	mediaProg    *backup.MediaProgressMsg
 	rcloneErrors []string
 }
@@ -32,10 +31,7 @@ type BackupModel struct {
 // NewBackupModel creates a BackupModel that reads from ch.
 func NewBackupModel(ch <-chan any) BackupModel {
 	p := progress.New(
-		progress.WithColors(
-			lipgloss.Color("#CBA6F7"), // colorMauve — filled portion
-			lipgloss.Color("#CBA6F7"), // single color (no gradient)
-		),
+		progress.WithColors(lipgloss.Color("#CBA6F7")), // colorMauve
 		progress.WithoutPercentage(), // we render percentage ourselves in the stats row
 	)
 	p.SetWidth(48)
@@ -63,7 +59,6 @@ func (m BackupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case backup.ScanMsg:
 		m.scanning = true
-		m.totalFiles = v.TotalFiles
 		m.totalBytes = v.TotalBytes
 		return m, tea.Batch(WaitForChan(m.ch), m.spinner.Tick)
 
@@ -227,11 +222,15 @@ func formatETA(eta *int64) string {
 }
 
 func formatCount(n int64) string {
-	if n < 1000 {
+	switch {
+	case n < 1_000:
 		return fmt.Sprintf("%d", n)
+	case n < 1_000_000:
+		return fmt.Sprintf("%d,%03d", n/1_000, n%1_000)
+	case n < 1_000_000_000:
+		return fmt.Sprintf("%d,%03d,%03d", n/1_000_000, (n/1_000)%1_000, n%1_000)
+	default:
+		return fmt.Sprintf("%d,%03d,%03d,%03d",
+			n/1_000_000_000, (n/1_000_000)%1_000, (n/1_000)%1_000, n%1_000)
 	}
-	if n < 1_000_000 {
-		return fmt.Sprintf("%d,%03d", n/1000, n%1000)
-	}
-	return fmt.Sprintf("%d,%03d,%03d", n/1_000_000, (n/1000)%1000, n%1000)
 }

@@ -189,6 +189,7 @@ func (r *BackupRunner) RunMedia(remote, srcDir string, ch chan<- any) error {
 
 	var fileErrors int
 	scanner := bufio.NewScanner(stderr)
+	scanner.Buffer(make([]byte, 256*1024), 256*1024)
 	for scanner.Scan() {
 		msg, ok := ParseRcloneLine(scanner.Bytes())
 		if !ok {
