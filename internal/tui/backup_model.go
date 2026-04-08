@@ -81,11 +81,13 @@ func (m BackupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, WaitForChan(m.ch)
 
 	case backup.ErrorMsg:
+		m.scanning = false
 		m.lastErr = v.Err
 		m.done = true
 		return m, tea.Quit
 
 	case backup.DoneMsg:
+		m.scanning = false
 		m.done = true
 		return m, tea.Quit
 
@@ -183,7 +185,7 @@ func (m BackupModel) renderProgressSection() string {
 		formatCount(p.FilesTotal),
 	)
 	sep := sepStyle.Render("  │  ")
-	out += " " + dimStyle.Render(speed+sep+eta+sep+files) + "\n"
+	out += " " + dimStyle.Render(speed) + sep + dimStyle.Render(eta) + sep + dimStyle.Render(files) + "\n"
 
 	return out
 }
