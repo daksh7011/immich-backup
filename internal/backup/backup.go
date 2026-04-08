@@ -3,7 +3,6 @@ package backup
 
 import (
 	"compress/gzip"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -64,9 +63,6 @@ type rcloneStats struct {
 	Transfers      int64   `json:"transfers"`
 	TotalTransfers int64   `json:"totalTransfers"`
 }
-
-// Used by parseRcloneLine (Task 2); added here in Task 1 with structs.
-var _ = json.Unmarshal
 
 // Runner orchestrates database and media backup operations.
 type Runner interface {
