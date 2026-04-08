@@ -3,6 +3,7 @@ package backup
 
 import (
 	"compress/gzip"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -62,6 +63,31 @@ type rcloneStats struct {
 	ETA            *int64  `json:"eta"`
 	Transfers      int64   `json:"transfers"`
 	TotalTransfers int64   `json:"totalTransfers"`
+}
+
+// ParseRcloneLine parses one JSON log line from rclone --use-json-log output.
+// Returns (MediaProgressMsg, true) for stats lines, (RcloneErrorMsg, true) for
+// error lines, and (nil, false) for all other lines (info, debug, etc.).
+// Exported so it can be tested from the _test package.
+func ParseRcloneLine(line []byte) (any, bool) {
+	var entry rcloneLogLine
+	if err := json.Unmarshal(line, &entry); err != nil {
+		return nil, false
+	}
+	if entry.Stats != nil {
+		return MediaProgressMsg{
+			TransferredBytes: entry.Stats.Bytes,
+			TotalBytes:       entry.Stats.TotalBytes,
+			Speed:            entry.Stats.Speed,
+			ETA:              entry.Stats.ETA,
+			FilesDone:        entry.Stats.Transfers,
+			FilesTotal:       entry.Stats.TotalTransfers,
+		}, true
+	}
+	if entry.Level == "error" {
+		return RcloneErrorMsg{Text: entry.Msg}, true
+	}
+	return nil, false
 }
 
 // Runner orchestrates database and media backup operations.
