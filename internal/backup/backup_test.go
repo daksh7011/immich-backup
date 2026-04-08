@@ -184,31 +184,122 @@ func TestRunMedia_SyncsFiles(t *testing.T) {
 	srcDir := t.TempDir()
 	dstDir := t.TempDir()
 
-	// Create dummy media files in source
 	for _, name := range []string{"photo1.jpg", "photo2.jpg", "video.mp4"} {
 		if err := os.WriteFile(filepath.Join(srcDir, name), []byte("dummy-content"), 0644); err != nil {
 			t.Fatalf("create dummy file: %v", err)
 		}
 	}
 
-	// Write a temp rclone.conf with a local: remote
 	confDir := t.TempDir()
 	confPath := filepath.Join(confDir, "rclone.conf")
-	confContent := fmt.Sprintf("[testdst]\ntype = local\nnounc = true\n")
+	confContent := "[testdst]\ntype = local\nnounc = true\n"
 	if err := os.WriteFile(confPath, []byte(confContent), 0600); err != nil {
 		t.Fatalf("write rclone config: %v", err)
 	}
 
+	ch := make(chan any, 50)
 	r := backup.New(newDockerClient(t), confPath)
 	remote := "testdst:" + dstDir
-	if err := r.RunMedia(remote, srcDir); err != nil {
+	if err := r.RunMedia(remote, srcDir, ch); err != nil {
 		t.Fatalf("RunMedia: %v", err)
 	}
+	close(ch)
 
+	// Collect messages.
+	var msgs []any
+	for msg := range ch {
+		msgs = append(msgs, msg)
+	}
+
+	// Must receive a ScanMsg.
+	hasScan := false
+	for _, m := range msgs {
+		if s, ok := m.(backup.ScanMsg); ok {
+			hasScan = true
+			if s.TotalFiles != 3 {
+				t.Errorf("ScanMsg.TotalFiles: got %d, want 3", s.TotalFiles)
+			}
+		}
+	}
+	if !hasScan {
+		t.Error("expected at least one ScanMsg")
+	}
+
+	// Files must be synced.
 	for _, name := range []string{"photo1.jpg", "photo2.jpg", "video.mp4"} {
 		dst := filepath.Join(dstDir, name)
 		if _, err := os.Stat(dst); os.IsNotExist(err) {
 			t.Errorf("expected %s to be synced to destination", name)
 		}
+	}
+}
+
+func TestParseRcloneLine_StatsLine(t *testing.T) {
+	eta := int64(4)
+	line := []byte(`{"level":"info","msg":"Transferred","stats":{"bytes":52523008,"totalBytes":375390208,"speed":60811070.1,"eta":4,"transfers":2,"totalTransfers":4},"source":"slog/logger.go:256"}`)
+	msg, ok := backup.ParseRcloneLine(line)
+	if !ok {
+		t.Fatal("expected ok=true for stats line")
+	}
+	p, isProgress := msg.(backup.MediaProgressMsg)
+	if !isProgress {
+		t.Fatalf("expected MediaProgressMsg, got %T", msg)
+	}
+	if p.TransferredBytes != 52523008 {
+		t.Errorf("TransferredBytes: got %d, want 52523008", p.TransferredBytes)
+	}
+	if p.TotalBytes != 375390208 {
+		t.Errorf("TotalBytes: got %d, want 375390208", p.TotalBytes)
+	}
+	if p.ETA == nil || *p.ETA != eta {
+		t.Errorf("ETA: got %v, want %d", p.ETA, eta)
+	}
+	if p.FilesDone != 2 {
+		t.Errorf("FilesDone: got %d, want 2", p.FilesDone)
+	}
+	if p.FilesTotal != 4 {
+		t.Errorf("FilesTotal: got %d, want 4", p.FilesTotal)
+	}
+}
+
+func TestParseRcloneLine_NullETA(t *testing.T) {
+	line := []byte(`{"level":"info","msg":"Transferred","stats":{"bytes":52523008,"totalBytes":375390208,"speed":0,"eta":null,"transfers":2,"totalTransfers":4}}`)
+	msg, ok := backup.ParseRcloneLine(line)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	p := msg.(backup.MediaProgressMsg)
+	if p.ETA != nil {
+		t.Errorf("expected nil ETA, got %v", p.ETA)
+	}
+}
+
+func TestParseRcloneLine_ErrorLine(t *testing.T) {
+	line := []byte(`{"level":"error","msg":"photo.jpg: Failed to copy: input/output error","source":"slog/logger.go:256"}`)
+	msg, ok := backup.ParseRcloneLine(line)
+	if !ok {
+		t.Fatal("expected ok=true for error line")
+	}
+	e, isErr := msg.(backup.RcloneErrorMsg)
+	if !isErr {
+		t.Fatalf("expected RcloneErrorMsg, got %T", msg)
+	}
+	if e.Text != "photo.jpg: Failed to copy: input/output error" {
+		t.Errorf("unexpected Text: %q", e.Text)
+	}
+}
+
+func TestParseRcloneLine_NonStatsInfoLine(t *testing.T) {
+	line := []byte(`{"level":"info","msg":"Copied (new)","size":5242880,"object":"file1.bin","source":"slog/logger.go:256"}`)
+	_, ok := backup.ParseRcloneLine(line)
+	if ok {
+		t.Error("expected ok=false for non-stats info line")
+	}
+}
+
+func TestParseRcloneLine_InvalidJSON(t *testing.T) {
+	_, ok := backup.ParseRcloneLine([]byte("not json"))
+	if ok {
+		t.Error("expected ok=false for invalid JSON")
 	}
 }
