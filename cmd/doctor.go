@@ -2,6 +2,9 @@
 package cmd
 
 import (
+	"context"
+	"fmt"
+
 	tea "charm.land/bubbletea/v2"
 	"github.com/spf13/cobra"
 	"github.com/daksh7011/immich-backup/internal/config"
@@ -31,15 +34,24 @@ func newDoctorCmd() *cobra.Command {
 				defer client.Close()
 			}
 
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
 			ch := make(chan any, 10)
 			go func() {
-				doctor.CheckAsync(ex, cfg, config.RcloneConfigPath(), ch)
+				doctor.CheckAsync(ctx, ex, cfg, config.RcloneConfigPath(), ch)
 				close(ch)
 			}()
 
 			model := tui.NewDoctorModel(ch)
-			_, err = tea.NewProgram(model).Run()
-			return err
+			result, err := tea.NewProgram(model).Run()
+			if err != nil {
+				return err
+			}
+			if result.(tui.DoctorModel).AnyFailed() {
+				return fmt.Errorf("one or more prerequisite checks failed")
+			}
+			return nil
 		},
 	}
 }

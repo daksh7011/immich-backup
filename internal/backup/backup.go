@@ -29,9 +29,9 @@ type BackupPhase int
 const (
 	PhaseDBDump    BackupPhase = iota // pg_dumpall is running
 	PhaseDBUpload                     // rclone copy of the DB dump is running
-	PhaseMediaScan                    // rclone size pre-scan is running
-	PhaseMediaCheck                   // rclone sync traversal (FilesTotal == 0)
-	PhaseMediaSync                    // rclone sync is transferring files
+	PhaseMediaScan                    // rclone size pre-scan is running; transitions to
+	// "Checking for changes" and "Syncing media" are inferred by the TUI from
+	// ScanMsg and MediaProgressMsg.FilesTotal, not from additional PhaseMsg sends.
 )
 
 // PhaseMsg is sent when the backup pipeline transitions to a new phase.
