@@ -2,8 +2,11 @@
 package backup
 
 import (
+	"bufio"
 	"compress/gzip"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,9 +23,89 @@ type ProgressMsg struct{ Text string }
 type ErrorMsg struct{ Err error }
 type DoneMsg struct{}
 
+// ScanMsg is sent after rclone size --json completes.
+type ScanMsg struct {
+	TotalFiles int64
+	TotalBytes int64
+}
+
+// MediaProgressMsg is sent each stats tick during rclone sync.
+type MediaProgressMsg struct {
+	TransferredBytes int64
+	TotalBytes       int64
+	Speed            float64 // bytes/sec; 0 on first tick
+	ETA              *int64  // nil = not yet known (rclone emits null on first tick)
+	FilesDone        int64
+	FilesTotal       int64
+}
+
+// RcloneErrorMsg is sent when rclone reports a file-level error.
+// Non-fatal: backup continues because RunMedia uses --ignore-errors.
+type RcloneErrorMsg struct {
+	Text string
+}
+
+// Private JSON structs used only inside this package.
+type rcloneSizeResult struct {
+	Count    int64 `json:"count"`
+	Bytes    int64 `json:"bytes"`
+	Sizeless int64 `json:"sizeless"`
+}
+
+type rcloneLogLine struct {
+	Level string       `json:"level"`
+	Msg   string       `json:"msg"`
+	Stats *rcloneStats `json:"stats"`
+}
+
+type rcloneStats struct {
+	Bytes          int64   `json:"bytes"`
+	TotalBytes     int64   `json:"totalBytes"`
+	Speed          float64 `json:"speed"`
+	ETA            *int64  `json:"eta"`
+	Transfers      int64   `json:"transfers"`
+	TotalTransfers int64   `json:"totalTransfers"`
+}
+
+// ParseRcloneLine parses one JSON log line from rclone --use-json-log output.
+// Returns (MediaProgressMsg, true) for stats lines, (RcloneErrorMsg, true) for
+// error lines, and (nil, false) for all other lines (info, debug, etc.).
+// Exported so it can be tested from the _test package.
+func ParseRcloneLine(line []byte) (any, bool) {
+	var entry rcloneLogLine
+	if err := json.Unmarshal(line, &entry); err != nil {
+		return nil, false
+	}
+	if entry.Stats != nil {
+		return MediaProgressMsg{
+			TransferredBytes: entry.Stats.Bytes,
+			TotalBytes:       entry.Stats.TotalBytes,
+			Speed:            entry.Stats.Speed,
+			ETA:              entry.Stats.ETA,
+			FilesDone:        entry.Stats.Transfers,
+			FilesTotal:       entry.Stats.TotalTransfers,
+		}, true
+	}
+	if entry.Level == "error" {
+		return RcloneErrorMsg{Text: entry.Msg}, true
+	}
+	return nil, false
+}
+
+// sendMsg sends msg to ch without blocking. Safe to call with a nil ch.
+func sendMsg(ch chan<- any, msg any) {
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- msg:
+	default:
+	}
+}
+
 // Runner orchestrates database and media backup operations.
 type Runner interface {
-	RunMedia(remote, srcDir string) error
+	RunMedia(remote, srcDir string, ch chan<- any) error
 	RunDatabase(container, pgUser, destPath string) error
 }
 
@@ -70,14 +153,66 @@ func (r *BackupRunner) RunDatabase(container, pgUser, destPath string) error {
 	return nil
 }
 
-// RunMedia syncs srcDir to the rclone remote using `rclone sync`.
-// rcloneConf MUST be non-empty; New() panics if it is (constitution Principle V).
-func (r *BackupRunner) RunMedia(remote, srcDir string) error {
-	args := []string{"--config", r.rcloneConf, "sync", srcDir, remote}
+// RunMedia pre-scans srcDir with rclone size, then syncs srcDir to remote
+// using rclone sync with JSON logging. Progress and file-level errors are sent
+// to ch. ch may be nil (progress is silently discarded).
+func (r *BackupRunner) RunMedia(remote, srcDir string, ch chan<- any) error {
+	// Phase 1: pre-scan to get total file count and bytes.
+	sizeOut, err := exec.Command("rclone", "--config", r.rcloneConf, "size", srcDir, "--json").Output()
+	if err != nil {
+		return fmt.Errorf("rclone size: %w", err)
+	}
+	var sizeResult rcloneSizeResult
+	if err := json.Unmarshal(sizeOut, &sizeResult); err != nil {
+		return fmt.Errorf("parse rclone size output: %w", err)
+	}
+	sendMsg(ch, ScanMsg{TotalFiles: sizeResult.Count, TotalBytes: sizeResult.Bytes})
+
+	// Phase 2: sync with JSON log streaming.
+	args := []string{
+		"--config", r.rcloneConf,
+		"sync", srcDir, remote,
+		"--use-json-log", "--stats", "1s", "--log-level", "INFO",
+		"--ignore-errors",
+	}
 	cmd := exec.Command("rclone", args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+
+	// cmd.Stdout is intentionally not set: rclone writes nothing meaningful to
+	// stdout when --use-json-log is active, so we let it go to /dev/null.
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("rclone stderr pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("rclone sync start: %w", err)
+	}
+
+	var fileErrors int
+	scanner := bufio.NewScanner(stderr)
+	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	for scanner.Scan() {
+		msg, ok := ParseRcloneLine(scanner.Bytes())
+		if !ok {
+			continue
+		}
+		if _, isErr := msg.(RcloneErrorMsg); isErr {
+			fileErrors++
+		}
+		sendMsg(ch, msg)
+	}
+
+	if err := scanner.Err(); err != nil {
+		_, _ = io.Copy(io.Discard, stderr)
+		_ = cmd.Wait()
+		return fmt.Errorf("rclone stderr read: %w", err)
+	}
+
+	if err := cmd.Wait(); err != nil && fileErrors == 0 {
+		// Non-zero exit with no captured RcloneErrorMsg values means a fatal rclone
+		// error (e.g. auth failure, missing remote). Those errors appear as critical-
+		// level or plain-text stderr before JSON logging is active, so fileErrors
+		// stays 0 and we surface the exit error. If fileErrors > 0, rclone exited 1
+		// due to --ignore-errors skipping files — that's expected partial success.
 		return fmt.Errorf("rclone sync: %w", err)
 	}
 	return nil
@@ -119,7 +254,7 @@ func Run(
 	}
 
 	send(ProgressMsg{Text: "Database dump uploaded. Starting media sync..."})
-	if err := r.RunMedia(rcloneRemote, uploadLocation); err != nil {
+	if err := r.RunMedia(rcloneRemote, uploadLocation, ch); err != nil {
 		send(ErrorMsg{Err: fmt.Errorf("media sync: %w", err)})
 		close(ch)
 		return
