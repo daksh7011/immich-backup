@@ -16,10 +16,8 @@ import (
 	"github.com/daksh7011/immich-backup/internal/docker"
 )
 
-// Progress message types sent to the TUI channel during a backup run.
-// These are defined here so internal/tui/backup_model.go can import them
-// without creating an import cycle.
-type ProgressMsg struct{ Text string }
+// Message types sent to the TUI channel during a backup run.
+// Defined here so internal/tui/backup_model.go can import them without a cycle.
 type ErrorMsg struct{ Err error }
 type DoneMsg struct{}
 

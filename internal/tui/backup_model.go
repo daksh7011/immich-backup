@@ -86,7 +86,11 @@ func NewBackupModel(ch <-chan any, cancel context.CancelFunc, skipDB, skipMedia 
 func (m BackupModel) Err() error { return m.lastErr }
 
 func (m BackupModel) Init() tea.Cmd {
-	return tea.Batch(WaitForChan(m.ch), m.spinner.Tick)
+	cmds := []tea.Cmd{WaitForChan(m.ch)}
+	if m.hasDBSteps || m.hasMediaSteps {
+		cmds = append(cmds, m.spinner.Tick)
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m BackupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
