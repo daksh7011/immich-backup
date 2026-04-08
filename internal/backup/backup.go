@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -176,6 +177,8 @@ func (r *BackupRunner) RunMedia(remote, srcDir string, ch chan<- any) error {
 	}
 	cmd := exec.Command("rclone", args...)
 
+	// cmd.Stdout is intentionally not set: rclone writes nothing meaningful to
+	// stdout when --use-json-log is active, so we let it go to /dev/null.
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		return fmt.Errorf("rclone stderr pipe: %w", err)
@@ -197,8 +200,18 @@ func (r *BackupRunner) RunMedia(remote, srcDir string, ch chan<- any) error {
 		sendMsg(ch, msg)
 	}
 
+	if err := scanner.Err(); err != nil {
+		_, _ = io.Copy(io.Discard, stderr)
+		_ = cmd.Wait()
+		return fmt.Errorf("rclone stderr read: %w", err)
+	}
+
 	if err := cmd.Wait(); err != nil && fileErrors == 0 {
-		// Non-zero exit with no captured file errors = fatal rclone error.
+		// Non-zero exit with no captured RcloneErrorMsg values means a fatal rclone
+		// error (e.g. auth failure, missing remote). Those errors appear as critical-
+		// level or plain-text stderr before JSON logging is active, so fileErrors
+		// stays 0 and we surface the exit error. If fileErrors > 0, rclone exited 1
+		// due to --ignore-errors skipping files — that's expected partial success.
 		return fmt.Errorf("rclone sync: %w", err)
 	}
 	return nil

@@ -192,7 +192,7 @@ func TestRunMedia_SyncsFiles(t *testing.T) {
 
 	confDir := t.TempDir()
 	confPath := filepath.Join(confDir, "rclone.conf")
-	confContent := fmt.Sprintf("[testdst]\ntype = local\nnounc = true\n")
+	confContent := "[testdst]\ntype = local\nnounc = true\n"
 	if err := os.WriteFile(confPath, []byte(confContent), 0600); err != nil {
 		t.Fatalf("write rclone config: %v", err)
 	}
