@@ -15,8 +15,6 @@ func newDoctorCmd() *cobra.Command {
 		Use:   "doctor",
 		Short: "Check all prerequisites and display results",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Doctor loads config itself — it must run even when config is invalid.
-			// A nil cfg means config check will fail, which is reported as a CheckResult.
 			cfg, _ := config.Load(config.DefaultConfigPath())
 			if cfg == nil {
 				cfg = &config.Config{}
@@ -24,7 +22,6 @@ func newDoctorCmd() *cobra.Command {
 
 			client, err := docker.NewClient()
 			if err != nil {
-				// Doctor must still run even if Docker is down — report it
 				client = nil
 				_ = err
 			}
@@ -34,10 +31,14 @@ func newDoctorCmd() *cobra.Command {
 				defer client.Close()
 			}
 
-			results := doctor.Check(ex, cfg, config.RcloneConfigPath())
-			model := tui.NewDoctorModel(results)
-			p := tea.NewProgram(model)
-			_, err = p.Run()
+			ch := make(chan any, 10)
+			go func() {
+				doctor.CheckAsync(ex, cfg, config.RcloneConfigPath(), ch)
+				close(ch)
+			}()
+
+			model := tui.NewDoctorModel(ch)
+			_, err = tea.NewProgram(model).Run()
 			return err
 		},
 	}
