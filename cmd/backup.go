@@ -72,7 +72,7 @@ func newBackupCmd() *cobra.Command {
 				ch,
 			)
 
-			model := tui.NewBackupModel(ch, cancel)
+			model := tui.NewBackupModel(ch, cancel, skipDB, skipMedia)
 			p := tea.NewProgram(model)
 			result, err := p.Run()
 			if err != nil {
