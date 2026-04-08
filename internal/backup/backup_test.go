@@ -184,14 +184,12 @@ func TestRunMedia_SyncsFiles(t *testing.T) {
 	srcDir := t.TempDir()
 	dstDir := t.TempDir()
 
-	// Create dummy media files in source
 	for _, name := range []string{"photo1.jpg", "photo2.jpg", "video.mp4"} {
 		if err := os.WriteFile(filepath.Join(srcDir, name), []byte("dummy-content"), 0644); err != nil {
 			t.Fatalf("create dummy file: %v", err)
 		}
 	}
 
-	// Write a temp rclone.conf with a local: remote
 	confDir := t.TempDir()
 	confPath := filepath.Join(confDir, "rclone.conf")
 	confContent := fmt.Sprintf("[testdst]\ntype = local\nnounc = true\n")
@@ -199,12 +197,35 @@ func TestRunMedia_SyncsFiles(t *testing.T) {
 		t.Fatalf("write rclone config: %v", err)
 	}
 
+	ch := make(chan any, 50)
 	r := backup.New(newDockerClient(t), confPath)
 	remote := "testdst:" + dstDir
-	if err := r.RunMedia(remote, srcDir); err != nil {
+	if err := r.RunMedia(remote, srcDir, ch); err != nil {
 		t.Fatalf("RunMedia: %v", err)
 	}
+	close(ch)
 
+	// Collect messages.
+	var msgs []any
+	for msg := range ch {
+		msgs = append(msgs, msg)
+	}
+
+	// Must receive a ScanMsg.
+	hasScan := false
+	for _, m := range msgs {
+		if s, ok := m.(backup.ScanMsg); ok {
+			hasScan = true
+			if s.TotalFiles != 3 {
+				t.Errorf("ScanMsg.TotalFiles: got %d, want 3", s.TotalFiles)
+			}
+		}
+	}
+	if !hasScan {
+		t.Error("expected at least one ScanMsg")
+	}
+
+	// Files must be synced.
 	for _, name := range []string{"photo1.jpg", "photo2.jpg", "video.mp4"} {
 		dst := filepath.Join(dstDir, name)
 		if _, err := os.Stat(dst); os.IsNotExist(err) {

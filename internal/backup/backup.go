@@ -2,6 +2,7 @@
 package backup
 
 import (
+	"bufio"
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
@@ -90,9 +91,20 @@ func ParseRcloneLine(line []byte) (any, bool) {
 	return nil, false
 }
 
+// sendMsg sends msg to ch without blocking. Safe to call with a nil ch.
+func sendMsg(ch chan<- any, msg any) {
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- msg:
+	default:
+	}
+}
+
 // Runner orchestrates database and media backup operations.
 type Runner interface {
-	RunMedia(remote, srcDir string) error
+	RunMedia(remote, srcDir string, ch chan<- any) error
 	RunDatabase(container, pgUser, destPath string) error
 }
 
@@ -140,14 +152,53 @@ func (r *BackupRunner) RunDatabase(container, pgUser, destPath string) error {
 	return nil
 }
 
-// RunMedia syncs srcDir to the rclone remote using `rclone sync`.
-// rcloneConf MUST be non-empty; New() panics if it is (constitution Principle V).
-func (r *BackupRunner) RunMedia(remote, srcDir string) error {
-	args := []string{"--config", r.rcloneConf, "sync", srcDir, remote}
+// RunMedia pre-scans srcDir with rclone size, then syncs srcDir to remote
+// using rclone sync with JSON logging. Progress and file-level errors are sent
+// to ch. ch may be nil (progress is silently discarded).
+func (r *BackupRunner) RunMedia(remote, srcDir string, ch chan<- any) error {
+	// Phase 1: pre-scan to get total file count and bytes.
+	sizeOut, err := exec.Command("rclone", "--config", r.rcloneConf, "size", srcDir, "--json").Output()
+	if err != nil {
+		return fmt.Errorf("rclone size: %w", err)
+	}
+	var sizeResult rcloneSizeResult
+	if err := json.Unmarshal(sizeOut, &sizeResult); err != nil {
+		return fmt.Errorf("parse rclone size output: %w", err)
+	}
+	sendMsg(ch, ScanMsg{TotalFiles: sizeResult.Count, TotalBytes: sizeResult.Bytes})
+
+	// Phase 2: sync with JSON log streaming.
+	args := []string{
+		"--config", r.rcloneConf,
+		"sync", srcDir, remote,
+		"--use-json-log", "--stats", "1s", "--log-level", "INFO",
+		"--ignore-errors",
+	}
 	cmd := exec.Command("rclone", args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("rclone stderr pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("rclone sync start: %w", err)
+	}
+
+	var fileErrors int
+	scanner := bufio.NewScanner(stderr)
+	for scanner.Scan() {
+		msg, ok := ParseRcloneLine(scanner.Bytes())
+		if !ok {
+			continue
+		}
+		if _, isErr := msg.(RcloneErrorMsg); isErr {
+			fileErrors++
+		}
+		sendMsg(ch, msg)
+	}
+
+	if err := cmd.Wait(); err != nil && fileErrors == 0 {
+		// Non-zero exit with no captured file errors = fatal rclone error.
 		return fmt.Errorf("rclone sync: %w", err)
 	}
 	return nil
@@ -189,7 +240,7 @@ func Run(
 	}
 
 	send(ProgressMsg{Text: "Database dump uploaded. Starting media sync..."})
-	if err := r.RunMedia(rcloneRemote, uploadLocation); err != nil {
+	if err := r.RunMedia(rcloneRemote, uploadLocation, ch); err != nil {
 		send(ErrorMsg{Err: fmt.Errorf("media sync: %w", err)})
 		close(ch)
 		return
