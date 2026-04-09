@@ -72,19 +72,28 @@ func newBackupCmd() *cobra.Command {
 				ch,
 			)
 
-			model := tui.NewBackupModel(ch, cancel, skipDB, skipMedia)
-			p := tea.NewProgram(model)
-			result, err := p.Run()
-			if err != nil {
-				return fmt.Errorf("backup TUI: %w", err)
-			}
-
-			final := result.(tui.BackupModel)
 			run := &status.LastRun{Time: time.Now().UTC()}
-			if final.Err() != nil {
-				run.Result = "error"
-				run.Error = final.Err().Error()
+			if isTTY() {
+				model := tui.NewBackupModel(ch, cancel, skipDB, skipMedia)
+				p := tea.NewProgram(model)
+				result, err := p.Run()
+				if err != nil {
+					return fmt.Errorf("backup TUI: %w", err)
+				}
+				final := result.(tui.BackupModel)
+				if final.Err() != nil {
+					run.Result = "error"
+					run.Error = final.Err().Error()
+				} else {
+					run.Result = "success"
+				}
 			} else {
+				if err := runBackupHeadless(ctx, ch); err != nil {
+					run.Result = "error"
+					run.Error = err.Error()
+					_ = status.Save(config.StatusFilePath(), run)
+					return err
+				}
 				run.Result = "success"
 			}
 			_ = status.Save(config.StatusFilePath(), run)
@@ -113,3 +122,52 @@ func openRcloneLog(path string) io.WriteCloser {
 type nopCloser struct{ io.Writer }
 
 func (nopCloser) Close() error { return nil }
+
+// isTTY reports whether stdout is connected to a terminal.
+// When false (e.g. systemd, cron) the backup runs in headless mode.
+func isTTY() bool {
+	fi, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+// runBackupHeadless drains the backup event channel and logs each event via
+// slog. Used when there is no terminal (e.g. systemd service).
+func runBackupHeadless(ctx context.Context, ch <-chan any) error {
+	for {
+		select {
+		case msg, ok := <-ch:
+			if !ok {
+				// channel closed without DoneMsg → cancelled
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				return fmt.Errorf("backup channel closed unexpectedly")
+			}
+			switch v := msg.(type) {
+			case backup.PhaseMsg:
+				switch v.Phase {
+				case backup.PhaseDBDump:
+					slog.Info("backup: dumping database")
+				case backup.PhaseDBUpload:
+					slog.Info("backup: uploading database dump")
+				case backup.PhaseMediaScan:
+					slog.Info("backup: scanning media library")
+				}
+			case backup.ScanMsg:
+				slog.Info("backup: scan complete", "files", v.TotalFiles, "bytes", v.TotalBytes)
+			case backup.RcloneErrorMsg:
+				slog.Warn("backup: rclone error", "error", v.Text)
+			case backup.DoneMsg:
+				slog.Info("backup: complete")
+				return nil
+			case backup.ErrorMsg:
+				return v.Err
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
