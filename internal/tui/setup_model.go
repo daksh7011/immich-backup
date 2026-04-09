@@ -2,6 +2,8 @@
 package tui
 
 import (
+	"strings"
+
 	tea "charm.land/bubbletea/v2"
 	"charm.land/huh/v2"
 	"github.com/daksh7011/immich-backup/internal/config"
@@ -67,4 +69,14 @@ func (m SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m SetupModel) View() tea.View {
 	return tea.NewView(renderHeader("  Setup  ") + m.form.View())
+}
+
+// splitRemote splits a rclone remote string "name:path" into its components.
+// For "b2-encrypted:immich-backup" it returns ("b2-encrypted", "immich-backup").
+// If there is no colon, the whole string is the name and path is empty.
+func splitRemote(remote string) (name, path string) {
+	if i := strings.IndexByte(remote, ':'); i >= 0 {
+		return remote[:i], remote[i+1:]
+	}
+	return remote, ""
 }
