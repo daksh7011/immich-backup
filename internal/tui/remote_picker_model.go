@@ -28,7 +28,7 @@ func NewRemotePickerModel(remotes []string, defaultRemote string) RemotePickerMo
 	rn := new(string)
 	rp := new(string)
 	name, path := splitRemote(defaultRemote)
-	if !slices.Contains(remotes, name) && len(remotes) > 0 {
+	if !slices.Contains(remotes, name) {
 		name = remotes[0]
 	}
 	*rn = name
