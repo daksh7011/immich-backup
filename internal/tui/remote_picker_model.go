@@ -49,10 +49,8 @@ func NewRemotePickerModel(remotes []string, defaultRemote string) RemotePickerMo
 }
 
 // Result returns the combined "name:path" string chosen by the user.
+// Must only be called after Done() returns true; always construct via NewRemotePickerModel.
 func (m RemotePickerModel) Result() string {
-	if m.remoteName == nil {
-		return ""
-	}
 	return *m.remoteName + ":" + *m.remotePath
 }
 

@@ -78,7 +78,7 @@ func newBackupCmd() *cobra.Command {
 					return fmt.Errorf("remote picker: %w", err)
 				}
 				final := result.(tui.RemotePickerModel)
-				if final.Aborted() {
+				if !final.Done() || final.Aborted() {
 					fmt.Println("Backup cancelled.")
 					return nil
 				}
