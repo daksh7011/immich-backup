@@ -16,6 +16,7 @@ import (
 	"github.com/daksh7011/immich-backup/internal/config"
 	"github.com/daksh7011/immich-backup/internal/docker"
 	"github.com/daksh7011/immich-backup/internal/doctor"
+	"github.com/daksh7011/immich-backup/internal/rcloneconf"
 	"github.com/daksh7011/immich-backup/internal/status"
 	"github.com/daksh7011/immich-backup/internal/tui"
 )
@@ -58,6 +59,29 @@ func newBackupCmd() *cobra.Command {
 			logFile := openRcloneLog(config.RcloneLogPath())
 			defer logFile.Close()
 
+			// Resolve effective remote: --remote triggers interactive picker (one-shot, not saved),
+			// no flag silently uses the configured default.
+			effectiveRemote := cfg.Backup.RcloneRemote
+			pickRemote, _ := cmd.Flags().GetBool("remote")
+			if pickRemote {
+				remotes, err := rcloneconf.ListRemotes(config.RcloneConfigPath())
+				if err != nil || len(remotes) == 0 {
+					return fmt.Errorf("no rclone remotes found in %s — run `configure` first", config.RcloneConfigPath())
+				}
+				picker := tui.NewRemotePickerModel(remotes, cfg.Backup.RcloneRemote)
+				p := tea.NewProgram(picker)
+				result, err := p.Run()
+				if err != nil {
+					return fmt.Errorf("remote picker: %w", err)
+				}
+				final := result.(tui.RemotePickerModel)
+				if final.Aborted() {
+					fmt.Println("Backup cancelled.")
+					return nil
+				}
+				effectiveRemote = final.Result()
+			}
+
 			ch := make(chan any, 16)
 			go backup.Run(
 				ctx,
@@ -65,7 +89,7 @@ func newBackupCmd() *cobra.Command {
 				cfg.Immich.PostgresContainer,
 				cfg.Immich.PostgresUser,
 				cfg.Immich.UploadLocation,
-				cfg.Backup.RcloneRemote,
+				effectiveRemote,
 				client,
 				skipDB, skipMedia,
 				logFile,
@@ -102,6 +126,7 @@ func newBackupCmd() *cobra.Command {
 	}
 	c.Flags().Bool("skip-db", false, "Skip database dump and upload")
 	c.Flags().Bool("skip-media", false, "Skip media sync")
+	c.Flags().Bool("remote", false, "Interactively select backup remote (one-shot, does not update config)")
 	return c
 }
 
