@@ -32,3 +32,17 @@ func TestEnsureConfigured_EmptyFile(t *testing.T) {
 		t.Fatal("expected error for empty config, got nil")
 	}
 }
+
+func TestListRemotes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rclone.conf")
+	if err := os.WriteFile(path, []byte(validConf), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	remotes, err := rcloneconf.ListRemotes(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(remotes) != 1 || remotes[0] != "test-local" {
+		t.Fatalf("expected [test-local], got %v", remotes)
+	}
+}

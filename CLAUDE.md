@@ -32,3 +32,6 @@ setup, configure, backup, status, doctor, logs, daemon (install/uninstall/start/
 
 ## Commit style
 Do not add `Co-Authored-By` trailers to commits. Never add Claude or any AI tool as a collaborator in git commits.
+
+## Specs and plans
+Never commit files under `docs/superpowers/` (specs, plans, or any superpowers output). They are local-only working documents. Do not `git add` them under any circumstances — the `.gitignore` entry is a safety net, not the policy.

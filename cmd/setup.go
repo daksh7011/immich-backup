@@ -23,7 +23,7 @@ func newSetupCmd() *cobra.Command {
 				return fmt.Errorf("load config: %w", err)
 			}
 
-			model := tui.NewSetupModel(cfg)
+			model := tui.NewSetupModel(cfg, config.RcloneConfigPath())
 			p := tea.NewProgram(model)
 			result, err := p.Run()
 			if err != nil {
