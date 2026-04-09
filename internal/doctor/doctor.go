@@ -9,6 +9,10 @@ import (
 	"github.com/daksh7011/immich-backup/internal/docker"
 )
 
+// CheckStartMsg is sent on the channel immediately before each check begins.
+// Consumers can use it to show a spinner for the named check.
+type CheckStartMsg struct{ Name string }
+
 // CheckResult is the outcome of a single prerequisite check.
 type CheckResult struct {
 	Name    string
@@ -125,6 +129,27 @@ func checkConfig(cfg *config.Config) CheckResult {
 		}
 	}
 	return CheckResult{Name: "Config", OK: true, Message: "config is valid"}
+}
+
+// CheckAsync runs the same five checks as Check but streams progress via ch.
+// For each check it sends CheckStartMsg{Name} then CheckResult.
+// The caller is responsible for closing ch after CheckAsync returns.
+func CheckAsync(ex docker.Executor, cfg *config.Config, rcloneConfPath string, ch chan<- any) {
+	type namedCheck struct {
+		name string
+		fn   func() CheckResult
+	}
+	checks := []namedCheck{
+		{"rclone Binary", checkRcloneBinary},
+		{"rclone Config", func() CheckResult { return checkRcloneConf(rcloneConfPath) }},
+		{"Docker Socket", func() CheckResult { return checkDockerSocket(ex) }},
+		{"Postgres Container", func() CheckResult { return checkPostgresContainer(ex, cfg.Immich.PostgresContainer) }},
+		{"Config", func() CheckResult { return checkConfig(cfg) }},
+	}
+	for _, c := range checks {
+		ch <- CheckStartMsg{Name: c.name}
+		ch <- c.fn()
+	}
 }
 
 // AnyFailed returns true if any result has OK == false.

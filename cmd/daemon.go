@@ -16,26 +16,35 @@ func newDaemonCmd() *cobra.Command {
 		Short: "Manage the immich-backup background service",
 	}
 
-	// daemon.New() is called inside RunE, not at construction time, so it
-	// does not panic on platforms where the Manager is not yet implemented.
-	cmd.AddCommand(newDaemonSubCmd("install", "Install and enable the background service",
+	cmd.AddCommand(newDaemonSubCmd("install", "Install and enable the background service", "Installing service…",
 		func(c *cobra.Command) error { return daemon.New().Install(GetConfig(c)) }))
-	cmd.AddCommand(newDaemonSubCmd("uninstall", "Remove the background service",
+	cmd.AddCommand(newDaemonSubCmd("uninstall", "Remove the background service", "Uninstalling service…",
 		func(c *cobra.Command) error { return daemon.New().Uninstall() }))
-	cmd.AddCommand(newDaemonSubCmd("start", "Start the background service",
+	cmd.AddCommand(newDaemonSubCmd("start", "Start the background service", "Starting service…",
 		func(c *cobra.Command) error { return daemon.New().Start() }))
-	cmd.AddCommand(newDaemonSubCmd("stop", "Stop the background service",
+	cmd.AddCommand(newDaemonSubCmd("stop", "Stop the background service", "Stopping service…",
 		func(c *cobra.Command) error { return daemon.New().Stop() }))
-	cmd.AddCommand(newDaemonSubCmd("restart", "Restart the background service",
+	cmd.AddCommand(newDaemonSubCmd("restart", "Restart the background service", "Restarting service…",
 		func(c *cobra.Command) error { return daemon.New().Restart() }))
+
 	cmd.AddCommand(&cobra.Command{
 		Use:   "status",
 		Short: "Show background service status",
 		RunE: func(c *cobra.Command, _ []string) error {
-			out, err := daemon.New().Status()
-			return runDaemonModel(out, err)
+			ch := make(chan any, 1)
+			go func() {
+				out, err := daemon.New().Status()
+				ch <- tui.DaemonResultMsg{Msg: out, Err: err}
+				close(ch)
+			}()
+			result, runErr := tea.NewProgram(tui.NewDaemonModel(ch, "Fetching service status…")).Run()
+			if runErr != nil {
+				return fmt.Errorf("TUI: %w", runErr)
+			}
+			return result.(tui.DaemonModel).Err()
 		},
 	})
+
 	cmd.AddCommand(&cobra.Command{
 		Use:   "logs",
 		Short: "Show background service logs",
@@ -48,26 +57,32 @@ func newDaemonCmd() *cobra.Command {
 			return runErr
 		},
 	})
+
 	return cmd
 }
 
-func newDaemonSubCmd(use, short string, fn func(*cobra.Command) error) *cobra.Command {
+// newDaemonSubCmd creates a daemon subcommand that runs fn in a goroutine and
+// shows a spinner (label) while waiting.
+func newDaemonSubCmd(use, short, label string, fn func(*cobra.Command) error) *cobra.Command {
 	return &cobra.Command{
 		Use:   use,
 		Short: short,
 		RunE: func(c *cobra.Command, _ []string) error {
-			return runDaemonModel("", fn(c))
+			ch := make(chan any, 1)
+			go func() {
+				err := fn(c)
+				msg := ""
+				if err == nil {
+					msg = "Done."
+				}
+				ch <- tui.DaemonResultMsg{Msg: msg, Err: err}
+				close(ch)
+			}()
+			result, runErr := tea.NewProgram(tui.NewDaemonModel(ch, label)).Run()
+			if runErr != nil {
+				return fmt.Errorf("TUI: %w", runErr)
+			}
+			return result.(tui.DaemonModel).Err()
 		},
 	}
-}
-
-func runDaemonModel(msg string, err error) error {
-	if msg == "" && err == nil {
-		msg = "Done."
-	}
-	_, runErr := tea.NewProgram(tui.NewDaemonModel(msg, err)).Run()
-	if runErr != nil {
-		return fmt.Errorf("TUI: %w", runErr)
-	}
-	return err
 }

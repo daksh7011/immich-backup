@@ -23,6 +23,20 @@ type ProgressMsg struct{ Text string }
 type ErrorMsg struct{ Err error }
 type DoneMsg struct{}
 
+// BackupPhase identifies which phase of the backup pipeline is active.
+type BackupPhase int
+
+const (
+	PhaseDBDump    BackupPhase = iota // pg_dumpall is running
+	PhaseDBUpload                     // rclone copy of the DB dump is running
+	PhaseMediaScan                    // rclone size pre-scan is running
+	PhaseMediaCheck                   // rclone sync traversal (FilesTotal == 0)
+	PhaseMediaSync                    // rclone sync is transferring files
+)
+
+// PhaseMsg is sent when the backup pipeline transitions to a new phase.
+type PhaseMsg struct{ Phase BackupPhase }
+
 // ScanMsg is sent after rclone size --json completes.
 type ScanMsg struct {
 	TotalFiles int64
@@ -331,7 +345,7 @@ func Run(
 	r := New(executor, rcloneConf, logWriter)
 
 	if !skipDB {
-		send(ProgressMsg{Text: "Starting database backup..."})
+		send(PhaseMsg{Phase: PhaseDBDump})
 		dumpPath := filepath.Join(os.TempDir(),
 			fmt.Sprintf("immich-db-%s.sql.gz", time.Now().Format("20060102-150405")))
 		if err := r.RunDatabase(container, pgUser, dumpPath); err != nil {
@@ -340,7 +354,7 @@ func Run(
 			return
 		}
 
-		send(ProgressMsg{Text: "Uploading database dump to remote..."})
+		send(PhaseMsg{Phase: PhaseDBUpload})
 		remoteDBDir := rcloneRemote + "/db"
 		uploadErr := r.RunDBUpload(ctx, dumpPath, remoteDBDir, ch)
 		_ = os.Remove(dumpPath) // best-effort; uploaded or failed, temp file is no longer needed
@@ -356,7 +370,7 @@ func Run(
 	}
 
 	if !skipMedia {
-		send(ProgressMsg{Text: "Starting media sync..."})
+		send(PhaseMsg{Phase: PhaseMediaScan})
 		if err := r.RunMedia(ctx, rcloneRemote, uploadLocation, ch); err != nil {
 			if ctx.Err() != nil {
 				close(ch)
@@ -366,7 +380,6 @@ func Run(
 			close(ch)
 			return
 		}
-		send(ProgressMsg{Text: "Media sync complete."})
 	}
 
 	send(DoneMsg{})
