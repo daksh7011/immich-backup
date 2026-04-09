@@ -189,11 +189,9 @@ func runBackupHeadless(ctx context.Context, ch <-chan any) error {
 					slog.Info("backup: dumping database")
 				case backup.PhaseDBUpload:
 					slog.Info("backup: uploading database dump")
-				case backup.PhaseMediaScan:
-					slog.Info("backup: scanning media library")
+				case backup.PhaseMedia:
+					slog.Info("backup: syncing media")
 				}
-			case backup.ScanMsg:
-				slog.Info("backup: scan complete", "files", v.TotalFiles, "bytes", v.TotalBytes)
 			case backup.RcloneErrorMsg:
 				slog.Warn("backup: rclone error", "error", v.Text)
 			case backup.DoneMsg:
