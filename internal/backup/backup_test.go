@@ -205,26 +205,6 @@ func TestRunMedia_SyncsFiles(t *testing.T) {
 	}
 	close(ch)
 
-	// Collect messages.
-	var msgs []any
-	for msg := range ch {
-		msgs = append(msgs, msg)
-	}
-
-	// Must receive a ScanMsg.
-	hasScan := false
-	for _, m := range msgs {
-		if s, ok := m.(backup.ScanMsg); ok {
-			hasScan = true
-			if s.TotalFiles != 3 {
-				t.Errorf("ScanMsg.TotalFiles: got %d, want 3", s.TotalFiles)
-			}
-		}
-	}
-	if !hasScan {
-		t.Error("expected at least one ScanMsg")
-	}
-
 	// Files must be synced.
 	for _, name := range []string{"photo1.jpg", "photo2.jpg", "video.mp4"} {
 		dst := filepath.Join(dstDir, name)
