@@ -2,22 +2,75 @@
 package tui
 
 import (
+	"slices"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/huh/v2"
 	"github.com/daksh7011/immich-backup/internal/config"
+	"github.com/daksh7011/immich-backup/internal/rcloneconf"
 )
 
 // SetupModel collects initial configuration via a Huh form.
 type SetupModel struct {
-	form   *huh.Form
-	result *config.Config
-	done   bool
+	form       *huh.Form
+	result     *config.Config
+	done       bool
+	useSelect  bool
+	remoteName *string
+	remotePath *string
 }
 
 // NewSetupModel creates a SetupModel pre-populated with defaults from cfg.
-func NewSetupModel(cfg *config.Config) SetupModel {
+// rcloneConfigPath is used to populate the remote name selector; if it cannot
+// be read the field falls back to a plain text input.
+func NewSetupModel(cfg *config.Config, rcloneConfigPath string) SetupModel {
+	remoteName, remotePath := splitRemote(cfg.Backup.RcloneRemote)
+	remotes, err := rcloneconf.ListRemotes(rcloneConfigPath)
+	useSelect := err == nil && len(remotes) > 0
+
+	m := SetupModel{result: cfg, useSelect: useSelect}
+
+	var remoteGroup *huh.Group
+	if useSelect {
+		if !slices.Contains(remotes, remoteName) {
+			remoteName = remotes[0]
+		}
+		rn := new(string)
+		rp := new(string)
+		*rn = remoteName
+		*rp = remotePath
+		m.remoteName = rn
+		m.remotePath = rp
+		remoteGroup = huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("rclone remote name").
+				Options(huh.NewOptions[string](remotes...)...).
+				Value(rn),
+			huh.NewInput().
+				Title("Path / bucket (e.g. immich-backup)").
+				Value(rp),
+			huh.NewInput().
+				Title("Backup schedule (cron)").
+				Value(&cfg.Backup.Schedule),
+			huh.NewInput().
+				Title("DB backup frequency (cron)").
+				Value(&cfg.Backup.DBBackupFrequency),
+		)
+	} else {
+		remoteGroup = huh.NewGroup(
+			huh.NewInput().
+				Title("rclone remote (e.g. b2-encrypted:immich-backup)").
+				Value(&cfg.Backup.RcloneRemote),
+			huh.NewInput().
+				Title("Backup schedule (cron)").
+				Value(&cfg.Backup.Schedule),
+			huh.NewInput().
+				Title("DB backup frequency (cron)").
+				Value(&cfg.Backup.DBBackupFrequency),
+		)
+	}
+
 	form := huh.NewForm(
 		huh.NewGroup(
 			huh.NewInput().
@@ -33,19 +86,10 @@ func NewSetupModel(cfg *config.Config) SetupModel {
 				Title("Postgres database").
 				Value(&cfg.Immich.PostgresDB),
 		),
-		huh.NewGroup(
-			huh.NewInput().
-				Title("rclone remote (e.g. b2-encrypted:immich-backup)").
-				Value(&cfg.Backup.RcloneRemote),
-			huh.NewInput().
-				Title("Backup schedule (cron)").
-				Value(&cfg.Backup.Schedule),
-			huh.NewInput().
-				Title("DB backup frequency (cron)").
-				Value(&cfg.Backup.DBBackupFrequency),
-		),
+		remoteGroup,
 	)
-	return SetupModel{form: form, result: cfg}
+	m.form = form
+	return m
 }
 
 func (m SetupModel) Init() tea.Cmd          { return m.form.Init() }
@@ -58,6 +102,9 @@ func (m SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.form = f
 		switch m.form.State {
 		case huh.StateCompleted:
+			if m.useSelect {
+				m.result.Backup.RcloneRemote = *m.remoteName + ":" + *m.remotePath
+			}
 			m.done = true
 			return m, tea.Quit
 		case huh.StateAborted:
