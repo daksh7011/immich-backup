@@ -64,6 +64,9 @@ func newBackupCmd() *cobra.Command {
 			effectiveRemote := cfg.Backup.RcloneRemote
 			pickRemote, _ := cmd.Flags().GetBool("remote")
 			if pickRemote {
+				if !isTTY() {
+					return fmt.Errorf("--remote requires an interactive terminal")
+				}
 				remotes, err := rcloneconf.ListRemotes(config.RcloneConfigPath())
 				if err != nil || len(remotes) == 0 {
 					return fmt.Errorf("no rclone remotes found in %s — run `configure` first", config.RcloneConfigPath())
