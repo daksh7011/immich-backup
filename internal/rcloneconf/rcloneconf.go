@@ -28,6 +28,20 @@ func LaunchConfig(path string) error {
 	return launchConfig(path)
 }
 
+// ListRemotes returns the names of all remotes in the rclone config at path.
+// Remote names are returned without the trailing colon that rclone appends.
+func ListRemotes(path string) ([]string, error) {
+	remotes, err := listRemotes(path)
+	if err != nil {
+		return nil, err
+	}
+	stripped := make([]string, len(remotes))
+	for i, r := range remotes {
+		stripped[i] = strings.TrimSuffix(r, ":")
+	}
+	return stripped, nil
+}
+
 // listRemotes runs `rclone listremotes --config path` and returns remote names.
 func listRemotes(path string) ([]string, error) {
 	out, err := exec.Command("rclone", "listremotes", "--config", path).Output()
