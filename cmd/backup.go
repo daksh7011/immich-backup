@@ -45,19 +45,22 @@ func newBackupCmd() *cobra.Command {
 							"check", r.Name, "message", r.Message, "remedy", r.Remedy)
 					}
 				}
+				client.Close() // os.Exit bypasses defer
 				os.Exit(1)
 			}
 
-			// Start live TUI + backup runner concurrently.
+			// Open log file before registering cancel so the defer order (LIFO) is:
+			//   1. cancel()        — signals goroutine to stop writing
+			//   2. logFile.Close() — safe to close after goroutine is signalled
+			logFile := openRcloneLog(config.RcloneLogPath())
+			defer logFile.Close()
+
 			// ctx is cancelled when the user presses Ctrl+C, which kills rclone.
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
 			skipDB, _ := cmd.Flags().GetBool("skip-db")
 			skipMedia, _ := cmd.Flags().GetBool("skip-media")
-
-			logFile := openRcloneLog(config.RcloneLogPath())
-			defer logFile.Close()
 
 			// Resolve effective remote: --remote triggers interactive picker (one-shot, not saved),
 			// no flag silently uses the configured default.
@@ -105,6 +108,8 @@ func newBackupCmd() *cobra.Command {
 				p := tea.NewProgram(model)
 				result, err := p.Run()
 				if err != nil {
+					// TUI itself failed — backup outcome unknown; don't save a
+					// misleading status record. defer cancel() will stop the goroutine.
 					return fmt.Errorf("backup TUI: %w", err)
 				}
 				final := result.(tui.BackupModel)
@@ -151,14 +156,17 @@ type nopCloser struct{ io.Writer }
 
 func (nopCloser) Close() error { return nil }
 
-// isTTY reports whether stdout is connected to a terminal.
-// When false (e.g. systemd, cron) the backup runs in headless mode.
+// isTTY reports whether both stdin and stdout are connected to a terminal.
+// Bubble Tea requires both for interactive rendering and keypress handling.
+// When false (e.g. systemd, cron, piped output) the backup runs headless.
 func isTTY() bool {
-	fi, err := os.Stdout.Stat()
-	if err != nil {
-		return false
+	for _, f := range []*os.File{os.Stdin, os.Stdout} {
+		fi, err := f.Stat()
+		if err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+			return false
+		}
 	}
-	return fi.Mode()&os.ModeCharDevice != 0
+	return true
 }
 
 // runBackupHeadless drains the backup event channel and logs each event via
@@ -195,6 +203,9 @@ func runBackupHeadless(ctx context.Context, ch <-chan any) error {
 				return v.Err
 			}
 		case <-ctx.Done():
+			// Reached if an external caller cancels the context (e.g. a future
+			// signal handler). Currently unreachable: defer cancel() fires only
+			// after this function returns.
 			return ctx.Err()
 		}
 	}
