@@ -17,28 +17,38 @@ import (
 type BackupModel struct {
 	ch      <-chan any
 	cancel  context.CancelFunc
-	lines   []string
 	done    bool
 	lastErr error
 
-	// progress tracking
-	progress      progress.Model
+	// named phase steps; only shown when the relevant phase is not being skipped
+	dbDumpStep     step
+	dbUploadStep   step
+	mediaScanStep  step
+	mediaCheckStep step
+	mediaSyncStep  step
+
+	hasDBSteps    bool
+	hasMediaSteps bool
+
+	// progress bars
 	dbProgress    progress.Model
-	spinner       spinner.Model
-	scanning      bool
-	totalBytes    int64
-	dbUploadProg  *backup.DBUploadProgressMsg
-	mediaProg     *backup.MediaProgressMsg
-	rcloneErrors  []string
+	mediaProgress progress.Model
+
+	// live progress data
+	dbUploadProg *backup.DBUploadProgressMsg
+	mediaProg    *backup.MediaProgressMsg
+	rcloneErrors []string
+
+	spinner spinner.Model
 }
 
 // NewBackupModel creates a BackupModel that reads from ch.
-// cancel is called when the user aborts (Ctrl+C); it must cancel the context
-// passed to backup.Run so the rclone subprocess is killed.
-func NewBackupModel(ch <-chan any, cancel context.CancelFunc) BackupModel {
+// cancel is called when the user aborts (Ctrl+C).
+// skipDB / skipMedia control which step groups are shown.
+func NewBackupModel(ch <-chan any, cancel context.CancelFunc, skipDB, skipMedia bool) BackupModel {
 	newBar := func() progress.Model {
 		p := progress.New(
-			progress.WithColors(lipgloss.Color("#CBA6F7")), // colorMauve
+			progress.WithColors(colorMauve),
 			progress.WithoutPercentage(),
 		)
 		p.SetWidth(48)
@@ -47,38 +57,72 @@ func NewBackupModel(ch <-chan any, cancel context.CancelFunc) BackupModel {
 
 	s := spinner.New()
 	s.Spinner = spinner.Dot
-	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#CBA6F7"))
+	s.Style = lipgloss.NewStyle().Foreground(colorMauve)
 
-	return BackupModel{
-		ch:         ch,
-		cancel:     cancel,
-		progress:   newBar(),
-		dbProgress: newBar(),
-		spinner:    s,
+	m := BackupModel{
+		ch:            ch,
+		cancel:        cancel,
+		dbProgress:    newBar(),
+		mediaProgress: newBar(),
+		spinner:       s,
+		hasDBSteps:    !skipDB,
+		hasMediaSteps: !skipMedia,
 	}
+
+	if !skipDB {
+		m.dbDumpStep = step{label: "Dumping database", state: stepPending}
+		m.dbUploadStep = step{label: "Uploading database dump", state: stepPending}
+	}
+	if !skipMedia {
+		m.mediaScanStep = step{label: "Scanning library", state: stepPending}
+		m.mediaCheckStep = step{label: "Checking for changes", state: stepPending}
+		m.mediaSyncStep = step{label: "Syncing media", state: stepPending}
+	}
+
+	return m
 }
 
 // Err returns the last fatal error received from the backup runner.
 func (m BackupModel) Err() error { return m.lastErr }
 
 func (m BackupModel) Init() tea.Cmd {
-	return WaitForChan(m.ch)
+	return tea.Batch(WaitForChan(m.ch), m.spinner.Tick)
 }
 
 func (m BackupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch v := msg.(type) {
 
+	case backup.PhaseMsg:
+		switch v.Phase {
+		case backup.PhaseDBDump:
+			m.dbDumpStep.state = stepRunning
+		case backup.PhaseDBUpload:
+			m.dbDumpStep.state = stepDone
+			m.dbUploadStep.state = stepRunning
+		case backup.PhaseMediaScan:
+			if m.hasDBSteps {
+				m.dbUploadStep.state = stepDone
+			}
+			m.mediaScanStep.state = stepRunning
+		}
+		return m, WaitForChan(m.ch)
+
+	case backup.ScanMsg:
+		m.mediaScanStep.state = stepDone
+		m.mediaScanStep.detail = fmt.Sprintf("%s files, %s",
+			formatCount(v.TotalFiles), formatBytes(v.TotalBytes))
+		m.mediaCheckStep.state = stepRunning
+		return m, WaitForChan(m.ch)
+
 	case backup.DBUploadProgressMsg:
 		m.dbUploadProg = &v
 		return m, WaitForChan(m.ch)
 
-	case backup.ScanMsg:
-		m.scanning = true
-		m.totalBytes = v.TotalBytes
-		return m, tea.Batch(WaitForChan(m.ch), m.spinner.Tick)
-
 	case backup.MediaProgressMsg:
-		m.scanning = false
+		if v.FilesTotal > 0 && m.mediaSyncStep.state == stepPending {
+			m.mediaCheckStep.state = stepDone
+			m.mediaSyncStep.state = stepRunning
+		}
 		m.mediaProg = &v
 		return m, WaitForChan(m.ch)
 
@@ -86,25 +130,23 @@ func (m BackupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rcloneErrors = append(m.rcloneErrors, v.Text)
 		return m, WaitForChan(m.ch)
 
-	case backup.ProgressMsg:
-		m.lines = append(m.lines, v.Text)
-		return m, WaitForChan(m.ch)
+	case backup.DoneMsg:
+		m.markRunningDone()
+		m.done = true
+		return m, nil
 
 	case backup.ErrorMsg:
-		m.scanning = false
+		m.markRunningError(v.Err.Error())
 		m.lastErr = v.Err
 		m.done = true
 		return m, nil
 
-	case backup.DoneMsg:
-		m.scanning = false
-		m.done = true
-		return m, nil
-
 	case spinner.TickMsg:
-		var cmd tea.Cmd
-		m.spinner, cmd = m.spinner.Update(msg)
-		return m, cmd
+		if !m.done {
+			var cmd tea.Cmd
+			m.spinner, cmd = m.spinner.Update(msg)
+			return m, cmd
+		}
 
 	case tea.KeyMsg:
 		if m.done {
@@ -124,25 +166,59 @@ func (m BackupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// markRunningDone marks all currently-running steps as done.
+// mediaCheckStep gets "up to date" detail if no media sync ever started.
+func (m *BackupModel) markRunningDone() {
+	for _, s := range []*step{&m.dbDumpStep, &m.dbUploadStep, &m.mediaScanStep} {
+		if s.state == stepRunning {
+			s.state = stepDone
+		}
+	}
+	if m.mediaCheckStep.state == stepRunning {
+		m.mediaCheckStep.state = stepDone
+		if m.mediaSyncStep.state == stepPending {
+			m.mediaCheckStep.detail = "up to date"
+		}
+	}
+	if m.mediaSyncStep.state == stepRunning {
+		m.mediaSyncStep.state = stepDone
+	}
+}
+
+// markRunningError marks the first running step as error with the given detail.
+func (m *BackupModel) markRunningError(detail string) {
+	for _, s := range []*step{
+		&m.dbDumpStep, &m.dbUploadStep,
+		&m.mediaScanStep, &m.mediaCheckStep, &m.mediaSyncStep,
+	} {
+		if s.state == stepRunning {
+			s.state = stepError
+			s.detail = detail
+			return
+		}
+	}
+}
+
 func (m BackupModel) View() tea.View {
 	out := renderHeader("  Backup Progress  ")
 
-	// Text log lines (database steps, etc.)
-	arrow := progressStyle.Render("→")
-	for _, l := range m.lines {
-		out += " " + arrow + " " + dimStyle.Render(l) + "\n"
+	// DB steps
+	if m.hasDBSteps {
+		out += renderOneStep(m.dbDumpStep, m.spinner)
+		out += renderOneStep(m.dbUploadStep, m.spinner)
+		if m.dbUploadProg != nil {
+			out += m.renderDBUploadBar()
+		}
 	}
 
-	// DB upload progress (shown once RunDBUpload sends its first tick)
-	if m.dbUploadProg != nil {
-		out += "\n"
-		out += m.renderDBUploadSection()
-	}
-
-	// Media progress section (scanning spinner or sync progress bar)
-	if m.scanning || m.mediaProg != nil || (m.done && m.totalBytes > 0) {
-		out += "\n"
-		out += m.renderProgressSection()
+	// Media steps
+	if m.hasMediaSteps {
+		out += renderOneStep(m.mediaScanStep, m.spinner)
+		out += renderOneStep(m.mediaCheckStep, m.spinner)
+		out += renderOneStep(m.mediaSyncStep, m.spinner)
+		if m.mediaProg != nil && m.mediaSyncStep.state != stepPending {
+			out += m.renderMediaSyncBar()
+		}
 	}
 
 	// File-level rclone errors
@@ -153,7 +229,7 @@ func (m BackupModel) View() tea.View {
 		}
 	}
 
-	// Fatal error or completion
+	// Fatal error or completion footer
 	if m.lastErr != nil {
 		out += "\n " + errStyle.Render("✗") + " " + errStyle.Render(fmt.Sprintf("Error: %v", m.lastErr)) + "\n"
 	} else if m.done {
@@ -174,48 +250,8 @@ func (m BackupModel) View() tea.View {
 	return tea.NewView(out)
 }
 
-func (m BackupModel) renderDBUploadSection() string {
+func (m BackupModel) renderDBUploadBar() string {
 	p := m.dbUploadProg
-	out := " " + dimStyle.Render("DB dump upload") + "\n"
-
-	pct := 0.0
-	if p.TotalBytes > 0 {
-		pct = float64(p.TransferredBytes) / float64(p.TotalBytes)
-		if pct > 1.0 {
-			pct = 1.0
-		}
-	}
-	// Clamp to 100% when backup is done (final tick may not reach exactly 1.0)
-	if m.done && m.mediaProg != nil {
-		pct = 1.0
-	}
-	pctLabel := fmt.Sprintf(" %3.0f%%", pct*100)
-	out += " " + m.dbProgress.ViewAs(pct) + dimStyle.Render(pctLabel) + "\n"
-
-	speed := formatSpeed(p.Speed)
-	eta := formatETA(p.ETA)
-	sep := sepStyle.Render("  │  ")
-	out += " " + dimStyle.Render(speed) + sep + dimStyle.Render(eta) + "\n"
-
-	return out
-}
-
-func (m BackupModel) renderProgressSection() string {
-	out := ""
-
-	if m.scanning {
-		// Indeterminate: spinner + label
-		out += " " + m.spinner.View() + " " + dimStyle.Render("Scanning library...") + "\n"
-		return out
-	}
-
-	if m.mediaProg == nil {
-		return out
-	}
-
-	p := m.mediaProg
-
-	// Determinate progress bar
 	pct := 0.0
 	if p.TotalBytes > 0 {
 		pct = float64(p.TransferredBytes) / float64(p.TotalBytes)
@@ -227,9 +263,27 @@ func (m BackupModel) renderProgressSection() string {
 		pct = 1.0
 	}
 	pctLabel := fmt.Sprintf(" %3.0f%%", pct*100)
-	out += " " + m.progress.ViewAs(pct) + dimStyle.Render(pctLabel) + "\n"
+	speed := formatSpeed(p.Speed)
+	eta := formatETA(p.ETA)
+	sep := sepStyle.Render("  │  ")
+	out := "   " + m.dbProgress.ViewAs(pct) + dimStyle.Render(pctLabel) + "\n"
+	out += "   " + dimStyle.Render(speed) + sep + dimStyle.Render(eta) + "\n"
+	return out
+}
 
-	// Stats row: speed | ETA | files
+func (m BackupModel) renderMediaSyncBar() string {
+	p := m.mediaProg
+	pct := 0.0
+	if p.TotalBytes > 0 {
+		pct = float64(p.TransferredBytes) / float64(p.TotalBytes)
+		if pct > 1.0 {
+			pct = 1.0
+		}
+	}
+	if m.done {
+		pct = 1.0
+	}
+	pctLabel := fmt.Sprintf(" %3.0f%%", pct*100)
 	speed := formatSpeed(p.Speed)
 	eta := formatETA(p.ETA)
 	files := fmt.Sprintf("%s / %s files",
@@ -237,8 +291,8 @@ func (m BackupModel) renderProgressSection() string {
 		formatCount(p.FilesTotal),
 	)
 	sep := sepStyle.Render("  │  ")
-	out += " " + dimStyle.Render(speed) + sep + dimStyle.Render(eta) + sep + dimStyle.Render(files) + "\n"
-
+	out := "   " + m.mediaProgress.ViewAs(pct) + dimStyle.Render(pctLabel) + "\n"
+	out += "   " + dimStyle.Render(speed) + sep + dimStyle.Render(eta) + sep + dimStyle.Render(files) + "\n"
 	return out
 }
 
@@ -267,13 +321,13 @@ func formatETA(eta *int64) string {
 		return "done"
 	}
 	h := int(d.Hours())
-	m := int(d.Minutes()) % 60
+	min := int(d.Minutes()) % 60
 	s := int(d.Seconds()) % 60
 	if h > 0 {
-		return fmt.Sprintf("%dh%02dm%02ds remaining", h, m, s)
+		return fmt.Sprintf("%dh%02dm%02ds remaining", h, min, s)
 	}
-	if m > 0 {
-		return fmt.Sprintf("%dm%02ds remaining", m, s)
+	if min > 0 {
+		return fmt.Sprintf("%dm%02ds remaining", min, s)
 	}
 	return fmt.Sprintf("%ds remaining", s)
 }
@@ -289,5 +343,18 @@ func formatCount(n int64) string {
 	default:
 		return fmt.Sprintf("%d,%03d,%03d,%03d",
 			n/1_000_000_000, (n/1_000_000)%1_000, (n/1_000)%1_000, n%1_000)
+	}
+}
+
+func formatBytes(b int64) string {
+	switch {
+	case b >= 1<<30:
+		return fmt.Sprintf("%.1f GB", float64(b)/(1<<30))
+	case b >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(b)/(1<<20))
+	case b >= 1<<10:
+		return fmt.Sprintf("%.1f KB", float64(b)/(1<<10))
+	default:
+		return fmt.Sprintf("%d B", b)
 	}
 }

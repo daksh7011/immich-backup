@@ -5,21 +5,77 @@ import (
 	"fmt"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/bubbles/v2/spinner"
+	"charm.land/lipgloss/v2"
 	"github.com/daksh7011/immich-backup/internal/doctor"
 )
 
-type DoctorModel struct{ results []doctor.CheckResult }
-
-func NewDoctorModel(results []doctor.CheckResult) DoctorModel {
-	return DoctorModel{results: results}
+// DoctorModel is the Bubble Tea model for the doctor command.
+// It receives doctor.CheckStartMsg and doctor.CheckResult values from a channel,
+// showing a spinner while each check runs and ✓/✗ when it completes.
+type DoctorModel struct {
+	ch      <-chan any
+	steps   []step
+	current int // index of the currently-running check
+	done    bool
+	spinner spinner.Model
 }
 
-func (m DoctorModel) Init() tea.Cmd { return nil }
+// NewDoctorModel creates a DoctorModel that reads from ch.
+func NewDoctorModel(ch <-chan any) DoctorModel {
+	s := spinner.New()
+	s.Spinner = spinner.Dot
+	s.Style = lipgloss.NewStyle().Foreground(colorMauve)
+	return DoctorModel{ch: ch, spinner: s}
+}
+
+func (m DoctorModel) Init() tea.Cmd {
+	return WaitForChan(m.ch)
+}
 
 func (m DoctorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if k, ok := msg.(tea.KeyMsg); ok {
-		switch k.String() {
-		case "q", "esc", "ctrl+c", "enter":
+	switch v := msg.(type) {
+
+	case doctor.CheckStartMsg:
+		m.steps = append(m.steps, step{label: v.Name, state: stepRunning})
+		m.current = len(m.steps) - 1
+		return m, tea.Batch(WaitForChan(m.ch), m.spinner.Tick)
+
+	case doctor.CheckResult:
+		if m.current < len(m.steps) {
+			if v.OK {
+				m.steps[m.current].state = stepDone
+				m.steps[m.current].detail = v.Message
+			} else {
+				m.steps[m.current].state = stepError
+				detail := v.Message
+				if v.Remedy != "" {
+					detail += " → " + v.Remedy
+				}
+				m.steps[m.current].detail = detail
+			}
+		}
+		return m, WaitForChan(m.ch)
+
+	case chanClosedMsg:
+		m.done = true
+		return m, nil
+
+	case spinner.TickMsg:
+		if !m.done {
+			var cmd tea.Cmd
+			m.spinner, cmd = m.spinner.Update(msg)
+			return m, cmd
+		}
+
+	case tea.KeyMsg:
+		if m.done {
+			switch v.String() {
+			case "q", "esc", "ctrl+c", "enter":
+				return m, tea.Quit
+			}
+		}
+		if v.String() == "ctrl+c" {
 			return m, tea.Quit
 		}
 	}
@@ -28,32 +84,25 @@ func (m DoctorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m DoctorModel) View() tea.View {
 	out := renderHeader("  Doctor  ")
+	out += renderSteps(m.steps, m.spinner)
 
-	passed := 0
-	for _, r := range m.results {
-		icon := okStyle.Render("✓")
-		label := dimStyle.Render(fmt.Sprintf("%-22s", r.Name))
-		if r.OK {
-			passed++
-			out += fmt.Sprintf("  %s  %s %s\n", icon, label, dimStyle.Render(r.Message))
-		} else {
-			icon = errStyle.Render("✗")
-			out += fmt.Sprintf("  %s  %s %s\n", icon, label, errStyle.Render(r.Message))
-			if r.Remedy != "" {
-				out += fmt.Sprintf("       %s\n", warnStyle.Render("→ "+r.Remedy))
+	if m.done && len(m.steps) > 0 {
+		passed := 0
+		for _, s := range m.steps {
+			if s.state == stepDone {
+				passed++
 			}
 		}
+		total := len(m.steps)
+		summary := fmt.Sprintf("%d/%d checks passed", passed, total)
+		out += "\n"
+		if passed == total {
+			out += "  " + okStyle.Render(summary) + "\n"
+		} else {
+			out += "  " + errStyle.Render(summary) + "\n"
+		}
+		out += renderHints([]Hint{{"q / esc / enter", "quit"}})
 	}
 
-	out += "\n"
-	total := len(m.results)
-	summary := fmt.Sprintf("%d/%d checks passed", passed, total)
-	if passed == total {
-		out += "  " + okStyle.Render(summary) + "\n"
-	} else {
-		out += "  " + errStyle.Render(summary) + "\n"
-	}
-
-	out += renderHints([]Hint{{"q / esc / enter", "quit"}})
 	return tea.NewView(out)
 }
