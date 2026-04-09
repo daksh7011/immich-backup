@@ -25,21 +25,13 @@ type DoneMsg struct{}
 type BackupPhase int
 
 const (
-	PhaseDBDump    BackupPhase = iota // pg_dumpall is running
-	PhaseDBUpload                     // rclone copy of the DB dump is running
-	PhaseMediaScan                    // rclone size pre-scan is running; transitions to
-	// "Checking for changes" and "Syncing media" are inferred by the TUI from
-	// ScanMsg and MediaProgressMsg.FilesTotal, not from additional PhaseMsg sends.
+	PhaseDBDump   BackupPhase = iota // pg_dumpall is running
+	PhaseDBUpload                    // rclone copy of the DB dump is running
+	PhaseMedia                       // rclone sync is running
 )
 
 // PhaseMsg is sent when the backup pipeline transitions to a new phase.
 type PhaseMsg struct{ Phase BackupPhase }
-
-// ScanMsg is sent after rclone size --json completes.
-type ScanMsg struct {
-	TotalFiles int64
-	TotalBytes int64
-}
 
 // MediaProgressMsg is sent each stats tick during rclone sync.
 type MediaProgressMsg struct {
@@ -66,12 +58,6 @@ type RcloneErrorMsg struct {
 }
 
 // Private JSON structs used only inside this package.
-type rcloneSizeResult struct {
-	Count    int64 `json:"count"`
-	Bytes    int64 `json:"bytes"`
-	Sizeless int64 `json:"sizeless"`
-}
-
 type rcloneLogLine struct {
 	Level string       `json:"level"`
 	Msg   string       `json:"msg"`
@@ -217,6 +203,10 @@ func (r *BackupRunner) RunDBUpload(ctx context.Context, dumpPath, remoteDir stri
 		if err := json.Unmarshal(line, &entry); err != nil {
 			continue
 		}
+		if entry.Level == "error" {
+			sendMsg(ch, RcloneErrorMsg{Text: entry.Msg})
+			continue
+		}
 		if entry.Stats == nil {
 			continue
 		}
@@ -249,20 +239,7 @@ func (r *BackupRunner) RunDBUpload(ctx context.Context, dumpPath, remoteDir stri
 // to ch. ch may be nil (progress is silently discarded).
 // If ctx is cancelled the rclone subprocess is killed immediately.
 func (r *BackupRunner) RunMedia(ctx context.Context, remote, srcDir string, ch chan<- any) error {
-	// Phase 1: pre-scan to get total file count and bytes.
-	sizeCmd := exec.CommandContext(ctx, "rclone", "--config", r.rcloneConf, "size", srcDir, "--json")
-	sizeCmd.Stderr = r.logWriter
-	sizeOut, err := sizeCmd.Output()
-	if err != nil {
-		return fmt.Errorf("rclone size: %w", err)
-	}
-	var sizeResult rcloneSizeResult
-	if err := json.Unmarshal(sizeOut, &sizeResult); err != nil {
-		return fmt.Errorf("parse rclone size output: %w", err)
-	}
-	sendMsg(ch, ScanMsg{TotalFiles: sizeResult.Count, TotalBytes: sizeResult.Bytes})
-
-	// Phase 2: sync with JSON log streaming.
+	// Sync with JSON log streaming.
 	args := []string{
 		"--config", r.rcloneConf,
 		"sync", srcDir, remote,
@@ -368,7 +345,7 @@ func Run(
 	}
 
 	if !skipMedia {
-		send(PhaseMsg{Phase: PhaseMediaScan})
+		send(PhaseMsg{Phase: PhaseMedia})
 		if err := r.RunMedia(ctx, rcloneRemote, uploadLocation, ch); err != nil {
 			if ctx.Err() != nil {
 				close(ch)

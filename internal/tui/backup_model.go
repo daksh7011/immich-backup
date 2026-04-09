@@ -21,11 +21,9 @@ type BackupModel struct {
 	lastErr error
 
 	// named phase steps; only shown when the relevant phase is not being skipped
-	dbDumpStep     step
-	dbUploadStep   step
-	mediaScanStep  step
-	mediaCheckStep step
-	mediaSyncStep  step
+	dbDumpStep    step
+	dbUploadStep  step
+	mediaSyncStep step
 
 	hasDBSteps    bool
 	hasMediaSteps bool
@@ -74,8 +72,6 @@ func NewBackupModel(ch <-chan any, cancel context.CancelFunc, skipDB, skipMedia 
 		m.dbUploadStep = step{label: "Uploading database dump", state: stepPending}
 	}
 	if !skipMedia {
-		m.mediaScanStep = step{label: "Scanning library", state: stepPending}
-		m.mediaCheckStep = step{label: "Checking for changes", state: stepPending}
 		m.mediaSyncStep = step{label: "Syncing media", state: stepPending}
 	}
 
@@ -103,19 +99,12 @@ func (m BackupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case backup.PhaseDBUpload:
 			m.dbDumpStep.state = stepDone
 			m.dbUploadStep.state = stepRunning
-		case backup.PhaseMediaScan:
+		case backup.PhaseMedia:
 			if m.hasDBSteps {
 				m.dbUploadStep.state = stepDone
 			}
-			m.mediaScanStep.state = stepRunning
+			m.mediaSyncStep.state = stepRunning
 		}
-		return m, WaitForChan(m.ch)
-
-	case backup.ScanMsg:
-		m.mediaScanStep.state = stepDone
-		m.mediaScanStep.detail = fmt.Sprintf("%s files, %s",
-			formatCount(v.TotalFiles), formatBytes(v.TotalBytes))
-		m.mediaCheckStep.state = stepRunning
 		return m, WaitForChan(m.ch)
 
 	case backup.DBUploadProgressMsg:
@@ -123,10 +112,6 @@ func (m BackupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, WaitForChan(m.ch)
 
 	case backup.MediaProgressMsg:
-		if v.FilesTotal > 0 && m.mediaSyncStep.state == stepPending {
-			m.mediaCheckStep.state = stepDone
-			m.mediaSyncStep.state = stepRunning
-		}
 		m.mediaProg = &v
 		return m, WaitForChan(m.ch)
 
@@ -178,30 +163,17 @@ func (m BackupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // markRunningDone marks all currently-running steps as done.
-// mediaCheckStep gets "up to date" detail if no media sync ever started.
 func (m *BackupModel) markRunningDone() {
-	for _, s := range []*step{&m.dbDumpStep, &m.dbUploadStep, &m.mediaScanStep} {
+	for _, s := range []*step{&m.dbDumpStep, &m.dbUploadStep, &m.mediaSyncStep} {
 		if s.state == stepRunning {
 			s.state = stepDone
 		}
-	}
-	if m.mediaCheckStep.state == stepRunning {
-		m.mediaCheckStep.state = stepDone
-		if m.mediaSyncStep.state == stepPending {
-			m.mediaCheckStep.detail = "up to date"
-		}
-	}
-	if m.mediaSyncStep.state == stepRunning {
-		m.mediaSyncStep.state = stepDone
 	}
 }
 
 // markRunningError marks the first running step as error with the given detail.
 func (m *BackupModel) markRunningError(detail string) {
-	for _, s := range []*step{
-		&m.dbDumpStep, &m.dbUploadStep,
-		&m.mediaScanStep, &m.mediaCheckStep, &m.mediaSyncStep,
-	} {
+	for _, s := range []*step{&m.dbDumpStep, &m.dbUploadStep, &m.mediaSyncStep} {
 		if s.state == stepRunning {
 			s.state = stepError
 			s.detail = detail
@@ -224,10 +196,8 @@ func (m BackupModel) View() tea.View {
 
 	// Media steps
 	if m.hasMediaSteps {
-		out += renderOneStep(m.mediaScanStep, m.spinner)
-		out += renderOneStep(m.mediaCheckStep, m.spinner)
 		out += renderOneStep(m.mediaSyncStep, m.spinner)
-		if m.mediaProg != nil && m.mediaSyncStep.state != stepPending {
+		if m.mediaProg != nil {
 			out += m.renderMediaSyncBar()
 		}
 	}
@@ -242,7 +212,14 @@ func (m BackupModel) View() tea.View {
 
 	// Fatal error or completion footer
 	if m.lastErr != nil {
-		out += "\n " + errStyle.Render("✗") + " " + errStyle.Render(fmt.Sprintf("Error: %v", m.lastErr)) + "\n"
+		out += "\n"
+		if len(m.rcloneErrors) > 0 {
+			// Specific rclone messages are already shown above; avoid repeating
+			// the generic "exit status 1" wrapper.
+			out += " " + errStyle.Render("✗") + " " + errStyle.Render("Backup failed — see errors above.") + "\n"
+		} else {
+			out += " " + errStyle.Render("✗") + " " + errStyle.Render(fmt.Sprintf("Error: %v", m.lastErr)) + "\n"
+		}
 	} else if m.done {
 		out += "\n"
 		if len(m.rcloneErrors) > 0 {
