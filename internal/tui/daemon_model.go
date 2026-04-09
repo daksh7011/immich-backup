@@ -59,6 +59,12 @@ func (m DaemonModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.done = true
 		return m, nil
 
+	case chanClosedMsg:
+		// Channel closed without DaemonResultMsg — defensive; should not happen
+		// in normal operation but prevents a silent hang if it ever does.
+		m.done = true
+		return m, nil
+
 	case spinner.TickMsg:
 		if !m.done {
 			var cmd tea.Cmd

@@ -16,10 +16,8 @@ import (
 	"github.com/daksh7011/immich-backup/internal/docker"
 )
 
-// Progress message types sent to the TUI channel during a backup run.
-// These are defined here so internal/tui/backup_model.go can import them
-// without creating an import cycle.
-type ProgressMsg struct{ Text string }
+// Message types sent to the TUI channel during a backup run.
+// Defined here so internal/tui/backup_model.go can import them without a cycle.
 type ErrorMsg struct{ Err error }
 type DoneMsg struct{}
 
@@ -29,9 +27,9 @@ type BackupPhase int
 const (
 	PhaseDBDump    BackupPhase = iota // pg_dumpall is running
 	PhaseDBUpload                     // rclone copy of the DB dump is running
-	PhaseMediaScan                    // rclone size pre-scan is running
-	PhaseMediaCheck                   // rclone sync traversal (FilesTotal == 0)
-	PhaseMediaSync                    // rclone sync is transferring files
+	PhaseMediaScan                    // rclone size pre-scan is running; transitions to
+	// "Checking for changes" and "Syncing media" are inferred by the TUI from
+	// ScanMsg and MediaProgressMsg.FilesTotal, not from additional PhaseMsg sends.
 )
 
 // PhaseMsg is sent when the backup pipeline transitions to a new phase.
@@ -330,12 +328,12 @@ func Run(
 	logWriter io.Writer,
 	ch chan<- any,
 ) {
-	send := func(msg any) {
-		select {
-		case ch <- msg:
-		default:
-		}
-	}
+	// send is a blocking send used for phase transitions and terminal messages
+	// (PhaseMsg, ErrorMsg, DoneMsg). These must not be dropped — losing a terminal
+	// message leaves the TUI frozen. Progress-tick messages (DBUploadProgressMsg,
+	// MediaProgressMsg) use the non-blocking sendMsg helper in their respective
+	// Run* methods and are safe to drop under backpressure.
+	send := func(msg any) { ch <- msg }
 
 	if logWriter == nil {
 		logWriter = io.Discard

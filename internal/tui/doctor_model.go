@@ -14,12 +14,16 @@ import (
 // It receives doctor.CheckStartMsg and doctor.CheckResult values from a channel,
 // showing a spinner while each check runs and ✓/✗ when it completes.
 type DoctorModel struct {
-	ch      <-chan any
-	steps   []step
-	current int // index of the currently-running check
-	done    bool
-	spinner spinner.Model
+	ch        <-chan any
+	steps     []step
+	current   int // index of the currently-running check
+	done      bool
+	anyFailed bool
+	spinner   spinner.Model
 }
+
+// AnyFailed returns true if at least one check did not pass.
+func (m DoctorModel) AnyFailed() bool { return m.anyFailed }
 
 // NewDoctorModel creates a DoctorModel that reads from ch.
 func NewDoctorModel(ch <-chan any) DoctorModel {
@@ -53,7 +57,9 @@ func (m DoctorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					detail += " → " + v.Remedy
 				}
 				m.steps[m.current].detail = detail
+				m.anyFailed = true
 			}
+			m.current++ // advance past completed step; guards against duplicate results
 		}
 		return m, WaitForChan(m.ch)
 

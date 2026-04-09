@@ -86,7 +86,11 @@ func NewBackupModel(ch <-chan any, cancel context.CancelFunc, skipDB, skipMedia 
 func (m BackupModel) Err() error { return m.lastErr }
 
 func (m BackupModel) Init() tea.Cmd {
-	return tea.Batch(WaitForChan(m.ch), m.spinner.Tick)
+	cmds := []tea.Cmd{WaitForChan(m.ch)}
+	if m.hasDBSteps || m.hasMediaSteps {
+		cmds = append(cmds, m.spinner.Tick)
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m BackupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -140,6 +144,13 @@ func (m BackupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastErr = v.Err
 		m.done = true
 		return m, nil
+
+	case chanClosedMsg:
+		// Channel closed without DoneMsg — backup was cancelled (ctx cancel).
+		// Mark whatever was running as aborted and exit.
+		m.markRunningError("aborted")
+		m.done = true
+		return m, tea.Quit
 
 	case spinner.TickMsg:
 		if !m.done {

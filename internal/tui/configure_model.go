@@ -9,8 +9,8 @@ import (
 // ConfigureModel wraps SetupModel for the configure command.
 type ConfigureModel struct{ SetupModel }
 
-func NewConfigureModel(cfg *config.Config) ConfigureModel {
-	return ConfigureModel{SetupModel: NewSetupModel(cfg)}
+func NewConfigureModel(cfg *config.Config, rcloneConfigPath string) ConfigureModel {
+	return ConfigureModel{SetupModel: NewSetupModel(cfg, rcloneConfigPath)}
 }
 
 func (m ConfigureModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {

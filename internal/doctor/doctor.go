@@ -2,6 +2,7 @@
 package doctor
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 
@@ -134,7 +135,11 @@ func checkConfig(cfg *config.Config) CheckResult {
 // CheckAsync runs the same five checks as Check but streams progress via ch.
 // For each check it sends CheckStartMsg{Name} then CheckResult.
 // The caller is responsible for closing ch after CheckAsync returns.
-func CheckAsync(ex docker.Executor, cfg *config.Config, rcloneConfPath string, ch chan<- any) {
+// ctx cancellation stops further checks and channel sends, preventing a goroutine
+// leak when the TUI exits early (e.g. Ctrl+C) before all checks complete.
+// Note: an in-progress check function itself is not interrupted by ctx — only
+// the sends between checks are guarded.
+func CheckAsync(ctx context.Context, ex docker.Executor, cfg *config.Config, rcloneConfPath string, ch chan<- any) {
 	type namedCheck struct {
 		name string
 		fn   func() CheckResult
@@ -147,8 +152,17 @@ func CheckAsync(ex docker.Executor, cfg *config.Config, rcloneConfPath string, c
 		{"Config", func() CheckResult { return checkConfig(cfg) }},
 	}
 	for _, c := range checks {
-		ch <- CheckStartMsg{Name: c.name}
-		ch <- c.fn()
+		select {
+		case ch <- CheckStartMsg{Name: c.name}:
+		case <-ctx.Done():
+			return
+		}
+		result := c.fn()
+		select {
+		case ch <- result:
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 
