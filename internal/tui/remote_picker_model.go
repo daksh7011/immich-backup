@@ -22,6 +22,9 @@ type RemotePickerModel struct {
 // remote names (no trailing colon). defaultRemote is the current configured
 // value (e.g. "b2-encrypted:immich-backup") used to pre-fill both fields.
 func NewRemotePickerModel(remotes []string, defaultRemote string) RemotePickerModel {
+	if len(remotes) == 0 {
+		panic("NewRemotePickerModel: remotes must not be empty")
+	}
 	rn := new(string)
 	rp := new(string)
 	name, path := splitRemote(defaultRemote)
@@ -78,5 +81,5 @@ func (m RemotePickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m RemotePickerModel) View() tea.View {
-	return tea.NewView(renderHeader("  Select Remote  ") + m.form.View())
+	return tea.NewView(renderHeader("  Select Remote  ") + m.form.View() + renderHints([]Hint{{"enter", "confirm"}, {"ctrl+c", "cancel"}}))
 }
