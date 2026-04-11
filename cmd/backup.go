@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -62,6 +63,10 @@ func newBackupCmd() *cobra.Command {
 			skipDB, _ := cmd.Flags().GetBool("skip-db")
 			skipMedia, _ := cmd.Flags().GetBool("skip-media")
 
+			if skipDB && skipMedia {
+				return fmt.Errorf("--skip-db and --skip-media together would back up nothing")
+			}
+
 			// Resolve effective remote: --remote triggers interactive picker (one-shot, not saved),
 			// no flag silently uses the configured default.
 			effectiveRemote := cfg.Backup.RcloneRemote
@@ -74,7 +79,10 @@ func newBackupCmd() *cobra.Command {
 				if err != nil || len(remotes) == 0 {
 					return fmt.Errorf("no rclone remotes found in %s — run `configure` first", config.RcloneConfigPath())
 				}
-				picker := tui.NewRemotePickerModel(remotes, cfg.Backup.RcloneRemote)
+				// Pre-fill path from saved remote_paths for the currently configured default remote.
+				defaultName, _ := splitRemote(cfg.Backup.RcloneRemote)
+				storedPath := cfg.Backup.RemotePaths[defaultName]
+				picker := tui.NewRemotePickerModel(remotes, defaultName+":"+storedPath)
 				p := tea.NewProgram(picker)
 				result, err := p.Run()
 				if err != nil {
@@ -86,6 +94,14 @@ func newBackupCmd() *cobra.Command {
 					return nil
 				}
 				effectiveRemote = final.Result()
+
+				// Persist the chosen path so future runs pre-fill it.
+				remoteName, remotePath := splitRemote(effectiveRemote)
+				if cfg.Backup.RemotePaths == nil {
+					cfg.Backup.RemotePaths = make(map[string]string)
+				}
+				cfg.Backup.RemotePaths[remoteName] = remotePath
+				_ = config.Save(config.DefaultConfigPath(), cfg)
 			}
 
 			ch := make(chan any, 16)
@@ -98,6 +114,11 @@ func newBackupCmd() *cobra.Command {
 				effectiveRemote,
 				client,
 				skipDB, skipMedia,
+				backup.MediaOpts{
+					Transfers:  cfg.Backup.Transfers,
+					Checkers:   cfg.Backup.Checkers,
+					BufferSize: cfg.Backup.BufferSize,
+				},
 				logFile,
 				ch,
 			)
@@ -167,6 +188,16 @@ func isTTY() bool {
 		}
 	}
 	return true
+}
+
+// splitRemote splits "name:path" into its two components.
+// For "b2:immich-backup" it returns ("b2", "immich-backup").
+// If there is no colon the whole string is the name and path is empty.
+func splitRemote(remote string) (name, path string) {
+	if i := strings.IndexByte(remote, ':'); i >= 0 {
+		return remote[:i], remote[i+1:]
+	}
+	return remote, ""
 }
 
 // runBackupHeadless drains the backup event channel and logs each event via
