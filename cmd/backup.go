@@ -67,8 +67,8 @@ func newBackupCmd() *cobra.Command {
 				return fmt.Errorf("--skip-db and --skip-media together would back up nothing")
 			}
 
-			// Resolve effective remote: --remote triggers interactive picker (one-shot, not saved),
-			// no flag silently uses the configured default.
+			// Resolve effective remote: --remote triggers interactive picker, saves the chosen
+			// path to remote_paths for future pre-fill but does not update rclone_remote itself.
 			effectiveRemote := cfg.Backup.RcloneRemote
 			pickRemote, _ := cmd.Flags().GetBool("remote")
 			if pickRemote {
@@ -101,7 +101,9 @@ func newBackupCmd() *cobra.Command {
 					cfg.Backup.RemotePaths = make(map[string]string)
 				}
 				cfg.Backup.RemotePaths[remoteName] = remotePath
-				_ = config.Save(config.DefaultConfigPath(), cfg)
+				if err := config.Save(config.DefaultConfigPath(), cfg); err != nil {
+					slog.Warn("could not persist remote path selection", "error", err)
+				}
 			}
 
 			ch := make(chan any, 16)
@@ -155,7 +157,7 @@ func newBackupCmd() *cobra.Command {
 	}
 	c.Flags().Bool("skip-db", false, "Skip database dump and upload")
 	c.Flags().Bool("skip-media", false, "Skip media sync")
-	c.Flags().Bool("remote", false, "Interactively select backup remote (one-shot, does not update config)")
+	c.Flags().Bool("remote", false, "Interactively select backup remote and save path for future pre-fill")
 	return c
 }
 
