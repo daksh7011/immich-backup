@@ -265,9 +265,8 @@ func (r *BackupRunner) RunDBUpload(ctx context.Context, dumpPath, remoteDir stri
 	return nil
 }
 
-// RunMedia pre-scans srcDir with rclone size, then syncs srcDir to remote
-// using rclone sync with JSON logging. Progress and file-level errors are sent
-// to ch. ch may be nil (progress is silently discarded).
+// RunMedia syncs srcDir to remote using rclone sync with JSON logging.
+// Progress and file-level errors are sent to ch. ch may be nil (progress is silently discarded).
 // If ctx is cancelled the rclone subprocess is killed immediately.
 func (r *BackupRunner) RunMedia(ctx context.Context, remote, srcDir string, opts MediaOpts, ch chan<- any) error {
 	// Sync with JSON log streaming.
