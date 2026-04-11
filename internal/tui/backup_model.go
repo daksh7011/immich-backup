@@ -127,6 +127,12 @@ func (m BackupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case backup.MediaProgressMsg:
 		m.mediaProg = &v
+		if m.overlay == overlayTransferring {
+			maxOff := max(0, len(v.Transferring)-overlayVisibleLines)
+			if m.xfrScrollOffset > maxOff {
+				m.xfrScrollOffset = maxOff
+			}
+		}
 		return m, WaitForChan(m.ch)
 
 	case backup.RcloneErrorMsg:
@@ -287,7 +293,11 @@ func (m BackupModel) View() tea.View {
 			out += " " + errStyle.Render("✗") + " " + errStyle.Render(e) + "\n"
 		}
 		if remainder > 0 {
-			out += " " + warnStyle.Render(fmt.Sprintf("+ %d more errors  (ctrl+o to view all)", remainder)) + "\n"
+			hintSuffix := ""
+			if !m.done {
+				hintSuffix = "  (ctrl+o to view all)"
+			}
+			out += " " + warnStyle.Render(fmt.Sprintf("+ %d more errors%s", remainder, hintSuffix)) + "\n"
 		}
 	}
 
@@ -545,6 +555,9 @@ func formatElapsed(secs float64) string {
 // truncateMid shortens s to at most maxRunes by removing the middle and inserting "…".
 // If s is already within the limit it is returned unchanged.
 func truncateMid(s string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
 	runes := []rune(s)
 	if len(runes) <= maxRunes {
 		return s
