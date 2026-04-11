@@ -49,6 +49,9 @@ func validCfg(t *testing.T, containerName string) *config.Config {
 			Schedule:          "0 3 * * *",
 			DBBackupFrequency: "0 */6 * * *",
 			Retention:         config.RetentionConfig{Daily: 7, Weekly: 4},
+			Transfers:         48,
+			Checkers:          128,
+			BufferSize:        "64M",
 		},
 		Daemon: config.DaemonConfig{LogPath: "/tmp/daemon.log"},
 	}
@@ -102,9 +105,13 @@ func TestCheck_PostgresDown(t *testing.T) {
 			PostgresDB:        "immich",
 		},
 		Backup: config.BackupConfig{
-			RcloneRemote: "local:/tmp", Schedule: "0 3 * * *",
+			RcloneRemote:      "local:/tmp",
+			Schedule:          "0 3 * * *",
 			DBBackupFrequency: "0 */6 * * *",
 			Retention:         config.RetentionConfig{Daily: 7, Weekly: 4},
+			Transfers:         48,
+			Checkers:          128,
+			BufferSize:        "64M",
 		},
 		Daemon: config.DaemonConfig{LogPath: "/tmp/daemon.log"},
 	}
