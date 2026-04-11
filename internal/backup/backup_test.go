@@ -283,3 +283,41 @@ func TestParseRcloneLine_InvalidJSON(t *testing.T) {
 		t.Error("expected ok=false for invalid JSON")
 	}
 }
+
+func TestParseRcloneLine_StatsWithTransferringArray(t *testing.T) {
+	eta := int64(9)
+	line := []byte(`{"level":"info","msg":"Transferred","stats":{"bytes":100,"totalBytes":200,"speed":1024,"eta":25,"transfers":1,"totalTransfers":2,"checks":50,"totalChecks":100,"elapsedTime":30.5,"transferring":[{"name":"upload/photo.jpg","size":1048576,"bytes":367001,"speed":1024000,"eta":9,"percentage":35}]}}`)
+	msg, ok := backup.ParseRcloneLine(line)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	p, ok := msg.(backup.MediaProgressMsg)
+	if !ok {
+		t.Fatalf("expected MediaProgressMsg, got %T", msg)
+	}
+	if p.Checks != 50 {
+		t.Errorf("Checks: got %d, want 50", p.Checks)
+	}
+	if p.TotalChecks != 100 {
+		t.Errorf("TotalChecks: got %d, want 100", p.TotalChecks)
+	}
+	if p.ElapsedTime != 30.5 {
+		t.Errorf("ElapsedTime: got %f, want 30.5", p.ElapsedTime)
+	}
+	if len(p.Transferring) != 1 {
+		t.Fatalf("Transferring: got %d entries, want 1", len(p.Transferring))
+	}
+	tf := p.Transferring[0]
+	if tf.Name != "upload/photo.jpg" {
+		t.Errorf("Transferring[0].Name: got %q, want upload/photo.jpg", tf.Name)
+	}
+	if tf.Percentage != 35 {
+		t.Errorf("Transferring[0].Percentage: got %d, want 35", tf.Percentage)
+	}
+	if tf.ETA == nil || *tf.ETA != eta {
+		t.Errorf("Transferring[0].ETA: got %v, want %d", tf.ETA, eta)
+	}
+	if tf.Speed != 1024000 {
+		t.Errorf("Transferring[0].Speed: got %f, want 1024000", tf.Speed)
+	}
+}
