@@ -25,10 +25,14 @@ type ImmichConfig struct {
 }
 
 type BackupConfig struct {
-	RcloneRemote      string          `yaml:"rclone_remote"`
-	Schedule          string          `yaml:"schedule"`
-	DBBackupFrequency string          `yaml:"db_backup_frequency"`
-	Retention         RetentionConfig `yaml:"retention"`
+	RcloneRemote      string            `yaml:"rclone_remote"`
+	Schedule          string            `yaml:"schedule"`
+	DBBackupFrequency string            `yaml:"db_backup_frequency"`
+	Retention         RetentionConfig   `yaml:"retention"`
+	Transfers         int               `yaml:"transfers"`
+	Checkers          int               `yaml:"checkers"`
+	BufferSize        string            `yaml:"buffer_size"`
+	RemotePaths       map[string]string `yaml:"remote_paths"`
 }
 
 type RetentionConfig struct {
@@ -52,11 +56,14 @@ var defaults = Config{
 		Schedule:          "0 3 * * *",
 		DBBackupFrequency: "0 */6 * * *",
 		Retention:         RetentionConfig{Daily: 7, Weekly: 4},
+		Transfers:         48,
+		Checkers:          128,
+		BufferSize:        "64M",
 	},
 }
 
 // Load reads the config at path. If missing, writes defaults and returns them.
-// If present, unmarshals and validates. Any validation error is returned as-is.
+// If present, unmarshals, fills in missing perf fields with defaults, then validates.
 func Load(path string) (*Config, error) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		cfg := defaults
@@ -74,10 +81,25 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
+	applyDefaults(&cfg)
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// applyDefaults fills in zero-value perf fields with built-in defaults.
+// This ensures legacy configs (without transfers/checkers/buffer_size) load cleanly.
+func applyDefaults(cfg *Config) {
+	if cfg.Backup.Transfers == 0 {
+		cfg.Backup.Transfers = defaults.Backup.Transfers
+	}
+	if cfg.Backup.Checkers == 0 {
+		cfg.Backup.Checkers = defaults.Backup.Checkers
+	}
+	if cfg.Backup.BufferSize == "" {
+		cfg.Backup.BufferSize = defaults.Backup.BufferSize
+	}
 }
 
 // Save marshals cfg to YAML and writes it to path, creating parent dirs as needed.
@@ -110,6 +132,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Backup.Retention.Daily <= 0  { errs = append(errs, "backup.retention.daily must be > 0") }
 	if c.Backup.Retention.Weekly <= 0 { errs = append(errs, "backup.retention.weekly must be > 0") }
+	if c.Backup.Transfers <= 0        { errs = append(errs, "backup.transfers must be > 0") }
+	if c.Backup.Checkers <= 0         { errs = append(errs, "backup.checkers must be > 0") }
+	if c.Backup.BufferSize == ""       { errs = append(errs, "backup.buffer_size is required") }
 	if c.Daemon.LogPath == ""          { errs = append(errs, "daemon.log_path is required") }
 	if len(errs) > 0 {
 		return fmt.Errorf("config validation failed:\n  - %s", strings.Join(errs, "\n  - "))

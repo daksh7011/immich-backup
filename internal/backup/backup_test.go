@@ -138,7 +138,7 @@ func TestRun_HappyPath(t *testing.T) {
 	confPath, remote := localRcloneConf(t, "rundst")
 
 	ch := make(chan any, 20)
-	go backup.Run(context.Background(), confPath, pgName, "postgres", srcDir, remote, newDockerClient(t), false, false, nil, ch)
+	go backup.Run(context.Background(), confPath, pgName, "postgres", srcDir, remote, newDockerClient(t), false, false, backup.MediaOpts{Transfers: 2, Checkers: 4, BufferSize: "16M"}, nil, ch)
 	msgs := collectChan(ch)
 
 	if len(msgs) == 0 {
@@ -161,7 +161,7 @@ func TestRun_DatabaseFailure_StopsEarlyAndClosesChannel(t *testing.T) {
 
 	ch := make(chan any, 20)
 	// Non-existent container forces an immediate database failure.
-	go backup.Run(context.Background(), confPath, "nonexistent-container-xyzxyz", "postgres", t.TempDir(), remote, newDockerClient(t), false, false, nil, ch)
+	go backup.Run(context.Background(), confPath, "nonexistent-container-xyzxyz", "postgres", t.TempDir(), remote, newDockerClient(t), false, false, backup.MediaOpts{Transfers: 2, Checkers: 4, BufferSize: "16M"}, nil, ch)
 	msgs := collectChan(ch)
 
 	hasError := false
@@ -200,7 +200,7 @@ func TestRunMedia_SyncsFiles(t *testing.T) {
 	ch := make(chan any, 50)
 	r := backup.New(newDockerClient(t), confPath, nil)
 	remote := "testdst:" + dstDir
-	if err := r.RunMedia(context.Background(), remote, srcDir, ch); err != nil {
+	if err := r.RunMedia(context.Background(), remote, srcDir, backup.MediaOpts{Transfers: 2, Checkers: 4, BufferSize: "16M"}, ch); err != nil {
 		t.Fatalf("RunMedia: %v", err)
 	}
 	close(ch)
@@ -281,5 +281,43 @@ func TestParseRcloneLine_InvalidJSON(t *testing.T) {
 	_, ok := backup.ParseRcloneLine([]byte("not json"))
 	if ok {
 		t.Error("expected ok=false for invalid JSON")
+	}
+}
+
+func TestParseRcloneLine_StatsWithTransferringArray(t *testing.T) {
+	eta := int64(9)
+	line := []byte(`{"level":"info","msg":"Transferred","stats":{"bytes":100,"totalBytes":200,"speed":1024,"eta":25,"transfers":1,"totalTransfers":2,"checks":50,"totalChecks":100,"elapsedTime":30.5,"transferring":[{"name":"upload/photo.jpg","size":1048576,"bytes":367001,"speed":1024000,"eta":9,"percentage":35}]}}`)
+	msg, ok := backup.ParseRcloneLine(line)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	p, ok := msg.(backup.MediaProgressMsg)
+	if !ok {
+		t.Fatalf("expected MediaProgressMsg, got %T", msg)
+	}
+	if p.Checks != 50 {
+		t.Errorf("Checks: got %d, want 50", p.Checks)
+	}
+	if p.TotalChecks != 100 {
+		t.Errorf("TotalChecks: got %d, want 100", p.TotalChecks)
+	}
+	if p.ElapsedTime != 30.5 {
+		t.Errorf("ElapsedTime: got %f, want 30.5", p.ElapsedTime)
+	}
+	if len(p.Transferring) != 1 {
+		t.Fatalf("Transferring: got %d entries, want 1", len(p.Transferring))
+	}
+	tf := p.Transferring[0]
+	if tf.Name != "upload/photo.jpg" {
+		t.Errorf("Transferring[0].Name: got %q, want upload/photo.jpg", tf.Name)
+	}
+	if tf.Percentage != 35 {
+		t.Errorf("Transferring[0].Percentage: got %d, want 35", tf.Percentage)
+	}
+	if tf.ETA == nil || *tf.ETA != eta {
+		t.Errorf("Transferring[0].ETA: got %v, want %d", tf.ETA, eta)
+	}
+	if tf.Speed != 1024000 {
+		t.Errorf("Transferring[0].Speed: got %f, want 1024000", tf.Speed)
 	}
 }
