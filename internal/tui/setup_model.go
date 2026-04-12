@@ -2,7 +2,9 @@
 package tui
 
 import (
+	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -13,12 +15,14 @@ import (
 
 // SetupModel collects initial configuration via a Huh form.
 type SetupModel struct {
-	form       *huh.Form
-	result     *config.Config
-	done       bool
-	useSelect  bool
-	remoteName *string
-	remotePath *string
+	form         *huh.Form
+	result       *config.Config
+	done         bool
+	useSelect    bool
+	remoteName   *string
+	remotePath   *string
+	transfersStr *string
+	checkersStr  *string
 }
 
 // NewSetupModel creates a SetupModel pre-populated with defaults from cfg.
@@ -30,6 +34,45 @@ func NewSetupModel(cfg *config.Config, rcloneConfigPath string) SetupModel {
 	useSelect := err == nil && len(remotes) > 0
 
 	m := SetupModel{result: cfg, useSelect: useSelect}
+
+	ts := new(string)
+	cs := new(string)
+	*ts = strconv.Itoa(cfg.Backup.Transfers)
+	*cs = strconv.Itoa(cfg.Backup.Checkers)
+	m.transfersStr = ts
+	m.checkersStr = cs
+
+	perfGroup := huh.NewGroup(
+		huh.NewInput().
+			Title("Parallel file transfers").
+			Value(ts).
+			Validate(func(s string) error {
+				v, err := strconv.Atoi(s)
+				if err != nil || v <= 0 {
+					return fmt.Errorf("must be a positive integer")
+				}
+				return nil
+			}),
+		huh.NewInput().
+			Title("Parallel checkers").
+			Value(cs).
+			Validate(func(s string) error {
+				v, err := strconv.Atoi(s)
+				if err != nil || v <= 0 {
+					return fmt.Errorf("must be a positive integer")
+				}
+				return nil
+			}),
+		huh.NewInput().
+			Title("Buffer size (e.g. 64M)").
+			Value(&cfg.Backup.BufferSize).
+			Validate(func(s string) error {
+				if s == "" {
+					return fmt.Errorf("must not be empty")
+				}
+				return nil
+			}),
+	)
 
 	var remoteGroup *huh.Group
 	if useSelect {
@@ -87,6 +130,7 @@ func NewSetupModel(cfg *config.Config, rcloneConfigPath string) SetupModel {
 				Value(&cfg.Immich.PostgresDB),
 		),
 		remoteGroup,
+		perfGroup,
 	)
 	m.form = form
 	return m
@@ -104,6 +148,12 @@ func (m SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case huh.StateCompleted:
 			if m.useSelect {
 				m.result.Backup.RcloneRemote = *m.remoteName + ":" + *m.remotePath
+			}
+			if v, err := strconv.Atoi(*m.transfersStr); err == nil {
+				m.result.Backup.Transfers = v
+			}
+			if v, err := strconv.Atoi(*m.checkersStr); err == nil {
+				m.result.Backup.Checkers = v
 			}
 			m.done = true
 			return m, tea.Quit

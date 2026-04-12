@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/daksh7011/immich-backup/internal/docker"
@@ -33,6 +34,23 @@ const (
 // PhaseMsg is sent when the backup pipeline transitions to a new phase.
 type PhaseMsg struct{ Phase BackupPhase }
 
+// RcloneTransfer represents a single in-flight file transfer as reported by rclone.
+type RcloneTransfer struct {
+	Name       string  `json:"name"`
+	Size       int64   `json:"size"`
+	Bytes      int64   `json:"bytes"`
+	Speed      float64 `json:"speed"`
+	ETA        *int64  `json:"eta"`
+	Percentage int64   `json:"percentage"`
+}
+
+// MediaOpts configures rclone performance parameters for a media sync run.
+type MediaOpts struct {
+	Transfers  int
+	Checkers   int
+	BufferSize string
+}
+
 // MediaProgressMsg is sent each stats tick during rclone sync.
 type MediaProgressMsg struct {
 	TransferredBytes int64
@@ -41,6 +59,10 @@ type MediaProgressMsg struct {
 	ETA              *int64  // nil = not yet known (rclone emits null on first tick)
 	FilesDone        int64
 	FilesTotal       int64
+	Checks           int64
+	TotalChecks      int64
+	ElapsedTime      float64
+	Transferring     []RcloneTransfer
 }
 
 // DBUploadProgressMsg is sent each stats tick while uploading the database dump.
@@ -65,12 +87,16 @@ type rcloneLogLine struct {
 }
 
 type rcloneStats struct {
-	Bytes          int64   `json:"bytes"`
-	TotalBytes     int64   `json:"totalBytes"`
-	Speed          float64 `json:"speed"`
-	ETA            *int64  `json:"eta"`
-	Transfers      int64   `json:"transfers"`
-	TotalTransfers int64   `json:"totalTransfers"`
+	Bytes          int64            `json:"bytes"`
+	TotalBytes     int64            `json:"totalBytes"`
+	Speed          float64          `json:"speed"`
+	ETA            *int64           `json:"eta"`
+	Transfers      int64            `json:"transfers"`
+	TotalTransfers int64            `json:"totalTransfers"`
+	Checks         int64            `json:"checks"`
+	TotalChecks    int64            `json:"totalChecks"`
+	ElapsedTime    float64          `json:"elapsedTime"`
+	Transferring   []RcloneTransfer `json:"transferring"`
 }
 
 // ParseRcloneLine parses one JSON log line from rclone --use-json-log output.
@@ -90,6 +116,10 @@ func ParseRcloneLine(line []byte) (any, bool) {
 			ETA:              entry.Stats.ETA,
 			FilesDone:        entry.Stats.Transfers,
 			FilesTotal:       entry.Stats.TotalTransfers,
+			Checks:           entry.Stats.Checks,
+			TotalChecks:      entry.Stats.TotalChecks,
+			ElapsedTime:      entry.Stats.ElapsedTime,
+			Transferring:     entry.Stats.Transferring,
 		}, true
 	}
 	if entry.Level == "error" {
@@ -113,7 +143,7 @@ func sendMsg(ch chan<- any, msg any) {
 type Runner interface {
 	RunDatabase(container, pgUser, destPath string) error
 	RunDBUpload(ctx context.Context, dumpPath, remoteDir string, ch chan<- any) error
-	RunMedia(ctx context.Context, remote, srcDir string, ch chan<- any) error
+	RunMedia(ctx context.Context, remote, srcDir string, opts MediaOpts, ch chan<- any) error
 }
 
 // BackupRunner is the production implementation of Runner.
@@ -182,6 +212,7 @@ func (r *BackupRunner) RunDBUpload(ctx context.Context, dumpPath, remoteDir stri
 		"--config", r.rcloneConf,
 		"copy", dumpPath, remoteDir,
 		"--use-json-log", "--stats", "1s", "--log-level", "DEBUG",
+		"--transfers", "1",
 	}
 	cmd := exec.CommandContext(ctx, "rclone", args...)
 
@@ -234,17 +265,20 @@ func (r *BackupRunner) RunDBUpload(ctx context.Context, dumpPath, remoteDir stri
 	return nil
 }
 
-// RunMedia pre-scans srcDir with rclone size, then syncs srcDir to remote
-// using rclone sync with JSON logging. Progress and file-level errors are sent
-// to ch. ch may be nil (progress is silently discarded).
+// RunMedia syncs srcDir to remote using rclone sync with JSON logging.
+// Progress and file-level errors are sent to ch. ch may be nil (progress is silently discarded).
 // If ctx is cancelled the rclone subprocess is killed immediately.
-func (r *BackupRunner) RunMedia(ctx context.Context, remote, srcDir string, ch chan<- any) error {
+func (r *BackupRunner) RunMedia(ctx context.Context, remote, srcDir string, opts MediaOpts, ch chan<- any) error {
 	// Sync with JSON log streaming.
 	args := []string{
 		"--config", r.rcloneConf,
 		"sync", srcDir, remote,
 		"--use-json-log", "--stats", "1s", "--log-level", "DEBUG",
 		"--ignore-errors",
+		"--fast-list",
+		"--transfers", strconv.Itoa(opts.Transfers),
+		"--checkers", strconv.Itoa(opts.Checkers),
+		"--buffer-size", opts.BufferSize,
 	}
 	cmd := exec.CommandContext(ctx, "rclone", args...)
 
@@ -302,6 +336,7 @@ func Run(
 	rcloneConf, container, pgUser, uploadLocation, rcloneRemote string,
 	executor docker.Executor,
 	skipDB, skipMedia bool,
+	opts MediaOpts,
 	logWriter io.Writer,
 	ch chan<- any,
 ) {
@@ -346,7 +381,7 @@ func Run(
 
 	if !skipMedia {
 		send(PhaseMsg{Phase: PhaseMedia})
-		if err := r.RunMedia(ctx, rcloneRemote, uploadLocation, ch); err != nil {
+		if err := r.RunMedia(ctx, rcloneRemote, uploadLocation, opts, ch); err != nil {
 			if ctx.Err() != nil {
 				close(ch)
 				return
