@@ -83,15 +83,15 @@ immich:
 
 backup:
   rclone_remote: "b2-encrypted:immich-backup"  # rclone remote:path
-  schedule: "0 3 * * *"                         # Daily at 03:00
-  db_backup_frequency: "0 */6 * * *"            # Every 6 hours
-  retention:
-    daily: 7
-    weekly: 4
+  schedule: "0 3 * * *"                         # Daily at 03:00 (MINUTE HOUR * * *)
 
 daemon:
   log_path: ~/.immich-backup/logs/daemon.log   # must be absolute; a leading ~/ is expanded
 ```
+
+`backup.schedule` is the time of the daily backup, written as `MINUTE HOUR * * *` with plain numbers (`30 2 * * *` runs at 02:30). Steps, ranges, lists, macros such as `@daily`, and day, month or weekday restrictions are rejected, because the daemon schedules one run per day. After changing the schedule, re-run `immich-backup daemon install` to apply it; `setup` and `configure` remind you when a service is installed.
+
+`backup.db_backup_frequency` and `backup.retention` are **not yet implemented**: the database is dumped once per backup run and old dumps are not pruned. Existing configs that set them still load, but the values are ignored.
 
 `daemon.log_path` defaults to `~/.immich-backup/logs/daemon.log` when omitted. A leading `~/` (in `log_path` and `upload_location`) is expanded to your home directory when the config is loaded; any other relative `log_path` is rejected. `daemon install` creates the log directory and file, since systemd and launchd will not start the job if it is missing.
 

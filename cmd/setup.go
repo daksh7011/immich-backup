@@ -5,9 +5,9 @@ import (
 	"fmt"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/spf13/cobra"
 	"github.com/daksh7011/immich-backup/internal/config"
 	"github.com/daksh7011/immich-backup/internal/tui"
+	"github.com/spf13/cobra"
 )
 
 func newSetupCmd() *cobra.Command {
@@ -17,11 +17,14 @@ func newSetupCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			promptRcloneConfig(config.RcloneConfigPath())
 
-			// Load existing config (creates defaults if missing)
-			cfg, err := config.Load(config.DefaultConfigPath())
+			// Load the existing config, or defaults if missing, without
+			// validating it, so setup can repair an invalid file.
+			path := config.DefaultConfigPath()
+			cfg, err := loadWizardConfig(path)
 			if err != nil {
-				return fmt.Errorf("load config: %w", err)
+				return err
 			}
+			oldSchedule := cfg.Backup.Schedule
 
 			model := tui.NewSetupModel(cfg, config.RcloneConfigPath())
 			p := tea.NewProgram(model)
@@ -35,11 +38,7 @@ func newSetupCmd() *cobra.Command {
 				return nil
 			}
 
-			if err := config.Save(config.DefaultConfigPath(), final.Result()); err != nil {
-				return fmt.Errorf("save config: %w", err)
-			}
-			fmt.Println("Configuration saved to", config.DefaultConfigPath())
-			return nil
+			return finishWizard(path, oldSchedule, final.Result(), "Configuration saved to "+path)
 		},
 	}
 }

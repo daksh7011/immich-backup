@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 
 	"github.com/daksh7011/immich-backup/internal/config"
@@ -76,14 +75,6 @@ func cmdError(name string, args []string, out []byte, err error) error {
 		return fmt.Errorf("%s: %w: %s", cmd, err, msg)
 	}
 	return fmt.Errorf("%s: %w", cmd, err)
-}
-
-// isSimpleInt reports whether s is a non-negative decimal integer with no
-// step (/), range (-), or list (,) syntax. Used to validate cron hour/minute
-// fields before inserting them into launchd plist integers or systemd OnCalendar.
-func isSimpleInt(s string) bool {
-	_, err := strconv.Atoi(s)
-	return err == nil
 }
 
 // Detect returns the platform-appropriate Manager, or ErrUnsupported where

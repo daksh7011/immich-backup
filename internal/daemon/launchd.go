@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"text/template"
 	"time"
@@ -56,32 +57,25 @@ var plistTmpl = template.Must(template.New("plist").Funcs(template.FuncMap{"xml"
 `))
 
 // GeneratePlist returns the launchd plist XML for the given binary path and config.
-// Returns an error if the schedule uses step, range, or list expressions in the
-// minute or hour fields — launchd requires plain integers in StartCalendarInterval.
+// Returns an error for any schedule config.ValidateDaemonSchedule rejects:
+// launchd needs plain integers in StartCalendarInterval, and only Hour and
+// Minute are written, so a day, month or weekday restriction would be lost.
 // env becomes the EnvironmentVariables dict, since launchd gives jobs only
 // PATH=/usr/bin:/bin:/usr/sbin:/sbin. Every value is XML-escaped, so paths
 // containing & or < still produce a valid plist.
 // Exported for testing.
 func GeneratePlist(binaryPath string, cfg *config.Config, env ServiceEnv) (string, error) {
-	parts := strings.Fields(cfg.Backup.Schedule)
-	if len(parts) != 5 {
-		return "", fmt.Errorf("schedule must have exactly 5 cron fields, got %d", len(parts))
-	}
-	minute, hour := parts[0], parts[1]
-	if !isSimpleInt(minute) || !isSimpleInt(hour) {
-		return "", fmt.Errorf(
-			"launchd scheduling only supports simple hour/minute values (e.g. \"0 3 * * *\"); "+
-				"step/range/list expressions like %q are not supported — use a specific time",
-			cfg.Backup.Schedule,
-		)
+	hour, minute, err := config.ParseDailySchedule(cfg.Backup.Schedule)
+	if err != nil {
+		return "", fmt.Errorf("backup.schedule: %w", err)
 	}
 
 	var buf strings.Builder
 	if err := plistTmpl.Execute(&buf, map[string]any{
 		"Label":      plistLabel,
 		"BinaryPath": binaryPath,
-		"Hour":       hour,
-		"Minute":     minute,
+		"Hour":       strconv.Itoa(hour),
+		"Minute":     strconv.Itoa(minute),
 		"LogPath":    cfg.Daemon.LogPath,
 		"Env":        env.vars(),
 	}); err != nil {

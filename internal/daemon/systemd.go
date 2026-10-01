@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"text/template"
 
@@ -67,9 +66,9 @@ func GenerateSystemdUnit(binaryPath string, cfg *config.Config, env ServiceEnv) 
 }
 
 // GenerateSystemdTimer returns the systemd timer unit file content derived
-// from the cron schedule in cfg. Returns an error if the schedule uses step
-// expressions (e.g. */6) which cannot be directly expressed as a single
-// OnCalendar entry.
+// from the cron schedule in cfg. Returns an error for any schedule
+// config.ValidateDaemonSchedule rejects (steps, ranges, lists, macros, or a
+// day, month or weekday restriction), which one OnCalendar entry cannot express.
 // Exported for testing.
 func GenerateSystemdTimer(schedule string) (string, error) {
 	onCal, err := cronToOnCalendar(schedule)
@@ -83,24 +82,14 @@ func GenerateSystemdTimer(schedule string) (string, error) {
 	return buf.String(), nil
 }
 
-// cronToOnCalendar converts a simple "MINUTE HOUR * * *" cron expression to a
-// systemd OnCalendar value (e.g. "*-*-* 03:00:00"). Returns an error for
-// step, range, or list expressions in the minute or hour fields.
+// cronToOnCalendar converts a "MINUTE HOUR * * *" cron expression to a
+// systemd OnCalendar value (e.g. "*-*-* 03:00:00"), using the same rule as
+// config validation so a schedule that saves also installs.
 func cronToOnCalendar(schedule string) (string, error) {
-	parts := strings.Fields(schedule)
-	if len(parts) != 5 {
-		return "", fmt.Errorf("schedule must have exactly 5 cron fields, got %d", len(parts))
+	h, m, err := config.ParseDailySchedule(schedule)
+	if err != nil {
+		return "", fmt.Errorf("backup.schedule: %w", err)
 	}
-	minute, hour := parts[0], parts[1]
-	if !isSimpleInt(minute) || !isSimpleInt(hour) {
-		return "", fmt.Errorf(
-			"daemon scheduling only supports simple hour/minute values (e.g. \"0 3 * * *\"); "+
-				"step/range/list expressions like %q are not supported — use a specific time",
-			schedule,
-		)
-	}
-	m, _ := strconv.Atoi(minute)
-	h, _ := strconv.Atoi(hour)
 	return fmt.Sprintf("*-*-* %02d:%02d:00", h, m), nil
 }
 

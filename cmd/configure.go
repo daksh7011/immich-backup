@@ -5,9 +5,9 @@ import (
 	"fmt"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/spf13/cobra"
 	"github.com/daksh7011/immich-backup/internal/config"
 	"github.com/daksh7011/immich-backup/internal/tui"
+	"github.com/spf13/cobra"
 )
 
 func newConfigureCmd() *cobra.Command {
@@ -17,10 +17,13 @@ func newConfigureCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			promptRcloneConfig(config.RcloneConfigPath())
 
-			cfg, err := config.Load(config.DefaultConfigPath())
+			path := config.DefaultConfigPath()
+			cfg, err := loadWizardConfig(path)
 			if err != nil {
-				return fmt.Errorf("load config: %w", err)
+				return err
 			}
+			oldSchedule := cfg.Backup.Schedule
+
 			model := tui.NewConfigureModel(cfg, config.RcloneConfigPath())
 			p := tea.NewProgram(model)
 			result, err := p.Run()
@@ -32,11 +35,7 @@ func newConfigureCmd() *cobra.Command {
 				fmt.Println("Configure cancelled.")
 				return nil
 			}
-			if err := config.Save(config.DefaultConfigPath(), final.Result()); err != nil {
-				return fmt.Errorf("save config: %w", err)
-			}
-			fmt.Println("Configuration updated.")
-			return nil
+			return finishWizard(path, oldSchedule, final.Result(), "Configuration updated.")
 		},
 	}
 }

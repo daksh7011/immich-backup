@@ -107,3 +107,43 @@ func TestGenerateSystemdTimer_StepExpressionReturnsError(t *testing.T) {
 		t.Error("expected error for step expression in hour field, got nil")
 	}
 }
+
+// Day-of-month, month and day-of-week used to be dropped, so a weekly
+// schedule quietly ran every day. Both generators now reject it.
+func TestGenerateSystemdTimer_RejectsNonDailySchedules(t *testing.T) {
+	for _, expr := range []string{"0 3 * * 0", "0 3 1 * *", "@daily", "60 3 * * *"} {
+		if _, err := daemon.GenerateSystemdTimer(expr); err == nil {
+			t.Errorf("%q: expected error, got nil", expr)
+		}
+	}
+}
+
+func TestGeneratePlist_RejectsNonDailySchedules(t *testing.T) {
+	for _, expr := range []string{"0 3 * * 0", "0 3 * 6 *", "@daily", "0 24 * * *"} {
+		cfg := &config.Config{
+			Backup: config.BackupConfig{Schedule: expr},
+			Daemon: config.DaemonConfig{LogPath: "/tmp/daemon.log"},
+		}
+		if _, err := daemon.GeneratePlist("/usr/local/bin/immich-backup", cfg, testEnv); err == nil {
+			t.Errorf("%q: expected error, got nil", expr)
+		}
+	}
+}
+
+func TestGenerators_ZeroPaddedFields(t *testing.T) {
+	timer, err := daemon.GenerateSystemdTimer("05 07 * * *")
+	if err != nil {
+		t.Fatalf("GenerateSystemdTimer: %v", err)
+	}
+	if !strings.Contains(timer, "OnCalendar=*-*-* 07:05:00") {
+		t.Errorf("timer missing OnCalendar for 07:05:\n%s", timer)
+	}
+	cfg := &config.Config{
+		Backup: config.BackupConfig{Schedule: "05 07 * * *"},
+		Daemon: config.DaemonConfig{LogPath: "/tmp/daemon.log"},
+	}
+	plist := mustPlist(t, "/usr/local/bin/immich-backup", cfg)
+	if !strings.Contains(plist, "<integer>7</integer>") || !strings.Contains(plist, "<integer>5</integer>") {
+		t.Errorf("plist should hold plain integers 7 and 5:\n%s", plist)
+	}
+}
