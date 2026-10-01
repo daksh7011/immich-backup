@@ -93,6 +93,7 @@ func TestSystemdActivate_CallSequence(t *testing.T) {
 	}
 	want := []string{
 		"systemctl --user daemon-reload",
+		"systemctl --user reset-failed immich-backup.service",
 		"systemctl --user enable immich-backup.timer",
 		"systemctl --user restart immich-backup.timer",
 		lingerShow,
@@ -196,6 +197,27 @@ func TestSystemdStart_SurfacesSystemctlOutput(t *testing.T) {
 	err := m.Start()
 	if err == nil || !strings.Contains(err.Error(), "Unit immich-backup.timer not found.") {
 		t.Fatalf("expected systemctl output in error, got: %v", err)
+	}
+}
+
+// reset-failed fails when the service never ran; install and restart must
+// carry on regardless.
+func TestSystemdResetFailed_ErrorIsIgnored(t *testing.T) {
+	r := &fakeRunner{replies: map[string][]reply{
+		lingerShow: {{out: "yes\n"}},
+		"systemctl --user reset-failed immich-backup.service": {{out: "Unit immich-backup.service not loaded.", err: errors.New("exit status 5")}},
+	}}
+	m := newTestSystemd(r, 1000, "/run/user/1000")
+	if err := m.Activate(); err != nil {
+		t.Errorf("Activate: %v", err)
+	}
+	r.calls = nil
+	if err := m.Restart(); err != nil {
+		t.Errorf("Restart: %v", err)
+	}
+	want := []string{"systemctl --user reset-failed immich-backup.service", "systemctl --user restart immich-backup.timer"}
+	if strings.Join(r.calls, "\n") != strings.Join(want, "\n") {
+		t.Errorf("Restart calls:\n%s\nwant:\n%s", strings.Join(r.calls, "\n"), strings.Join(want, "\n"))
 	}
 }
 

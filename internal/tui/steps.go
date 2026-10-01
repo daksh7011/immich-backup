@@ -10,6 +10,7 @@ const (
 	stepRunning
 	stepDone
 	stepError
+	stepWarn // finished with a problem that does not block anything
 )
 
 type step struct {
@@ -35,6 +36,12 @@ func renderOneStep(s step, sp spinner.Model) string {
 			detail = "  " + errStyle.Render(s.detail)
 		}
 		return " " + errStyle.Render("✗") + " " + errStyle.Render(s.label) + detail + "\n"
+	case stepWarn:
+		detail := ""
+		if s.detail != "" {
+			detail = "  " + warnStyle.Render(s.detail)
+		}
+		return " " + warnStyle.Render("!") + " " + warnStyle.Render(s.label) + detail + "\n"
 	default: // stepPending
 		return " " + sepStyle.Render("·") + " " + dimStyle.Render(s.label) + "\n"
 	}

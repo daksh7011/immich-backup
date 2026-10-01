@@ -6,11 +6,12 @@ import (
 	"fmt"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/spf13/cobra"
 	"github.com/daksh7011/immich-backup/internal/config"
+	"github.com/daksh7011/immich-backup/internal/daemon"
 	"github.com/daksh7011/immich-backup/internal/docker"
 	"github.com/daksh7011/immich-backup/internal/doctor"
 	"github.com/daksh7011/immich-backup/internal/tui"
+	"github.com/spf13/cobra"
 )
 
 func newDoctorCmd() *cobra.Command {
@@ -36,12 +37,19 @@ func newDoctorCmd() *cobra.Command {
 				defer client.Close()
 			}
 
+			// The background service checks only warn; on a platform without a
+			// service manager svc stays nil and they say so.
+			var svc doctor.Service
+			if m, err := daemon.Detect(); err == nil {
+				svc = m
+			}
+
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
 			ch := make(chan any, 10)
 			go func() {
-				doctor.CheckAsync(ctx, ex, cfg, cfgErr, config.RcloneConfigPath(), ch)
+				doctor.CheckAsync(ctx, ex, cfg, cfgErr, config.RcloneConfigPath(), svc, ch)
 				close(ch)
 			}()
 

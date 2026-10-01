@@ -349,8 +349,8 @@ func TestLaunchdStatus_PrintsService(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}
-	if !strings.Contains(out, "state = waiting") {
-		t.Errorf("Status should return launchctl print output, got %q", out)
+	if !strings.Contains(out, "loaded, waiting") {
+		t.Errorf("Status should report the job state from launchctl print, got %q", out)
 	}
 	assertCalls(t, r.calls, agentPrint)
 }

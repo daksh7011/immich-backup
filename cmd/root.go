@@ -3,6 +3,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -81,9 +82,24 @@ func loadCommandConfig(cmdPath, configPath, statusPath string) (*config.Config, 
 func Execute() {
 	maybePrintBanner(os.Stdout, stdoutIsTerminal)
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, "Error:", err)
+		reportError(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// shownError wraps an error a TUI has already displayed. The command still
+// exits non-zero, but Execute does not print the error a second time.
+type shownError struct{ error }
+
+func (e shownError) Unwrap() error { return e.error }
+
+// reportError prints err for Execute unless a TUI already showed it.
+func reportError(w io.Writer, err error) {
+	var shown shownError
+	if errors.As(err, &shown) {
+		return
+	}
+	fmt.Fprintln(w, "Error:", err)
 }
 
 // maybePrintBanner prints the banner only for an interactive terminal. Under

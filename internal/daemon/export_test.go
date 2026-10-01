@@ -25,7 +25,8 @@ type SystemdManager = systemdManager
 // NewSystemdManagerWith builds a systemd manager with an injected command
 // runner, euid, environment lookup and user name.
 func NewSystemdManagerWith(r runner, geteuid func() int, getenv func(string) string, username func() (string, error)) *SystemdManager {
-	return &systemdManager{run: r, geteuid: geteuid, getenv: getenv, username: username}
+	return &systemdManager{run: r, geteuid: geteuid, getenv: getenv, username: username,
+		unitPath: unitPath, timerPath: timerPath}
 }
 
 // Activate exposes the post-write systemctl and linger sequence of Install.
@@ -44,9 +45,37 @@ type LaunchdManager = launchdManager
 // NewLaunchdManagerWith builds a launchd manager with an injected command
 // runner, uid and plist path.
 func NewLaunchdManagerWith(r runner, getuid func() int, plistPath func() string) *LaunchdManager {
-	return &launchdManager{run: r, getuid: getuid, plistPath: plistPath, sleep: func(time.Duration) {}}
+	return &launchdManager{run: r, getuid: getuid, plistPath: plistPath, sleep: func(time.Duration) {}, now: time.Now}
 }
 
 // Activate exposes the bootout, enable, bootstrap and verify sequence of
 // Install.
 func (m *launchdManager) Activate() error { return m.activate() }
+
+// SetPaths points the systemd manager at test unit and timer files.
+func (m *systemdManager) SetPaths(unit, timer string) {
+	m.unitPath = func() string { return unit }
+	m.timerPath = func() string { return timer }
+}
+
+// SetNow fixes the clock the launchd manager computes the next run from.
+func (m *launchdManager) SetNow(now time.Time) { m.now = func() time.Time { return now } }
+
+// State parsing and rendering helpers.
+var (
+	ParseSystemctlShow  = parseSystemctlShow
+	ParseLaunchctlPrint = parseLaunchctlPrint
+	SystemdState        = systemdState
+	LaunchdState        = launchdState
+	ParseSystemdUnit    = parseSystemdUnit
+	ParsePlist          = parsePlist
+	NextDailyRun        = nextDailyRun
+	SystemdTime         = systemdTime
+	Report              = report
+)
+
+// PlistInfo exposes plistInfo for LaunchdState.
+type PlistInfo = plistInfo
+
+// NeverExited exposes neverExited.
+const NeverExited = neverExited

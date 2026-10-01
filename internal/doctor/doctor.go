@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"runtime"
 	"strings"
 
 	"github.com/daksh7011/immich-backup/internal/config"
+	"github.com/daksh7011/immich-backup/internal/daemon"
 	"github.com/daksh7011/immich-backup/internal/docker"
 	"github.com/daksh7011/immich-backup/internal/rclonebin"
 )
@@ -22,6 +24,7 @@ type CheckStartMsg struct{ Name string }
 type CheckResult struct {
 	Name    string
 	OK      bool
+	Warn    bool // with OK false: a problem worth fixing that does not block a backup
 	Message string
 	Remedy  string
 }
@@ -173,7 +176,79 @@ func checkConfigLoad(cfg *config.Config, loadErr error) CheckResult {
 	return checkConfig(cfg)
 }
 
-// CheckAsync runs the same five checks as Check but streams progress via ch.
+// Service is the part of daemon.Manager the background service checks use.
+type Service interface {
+	State() (daemon.State, error)
+	Definition() (*daemon.Definition, error)
+}
+
+type namedCheck struct {
+	name string
+	fn   func() CheckResult
+}
+
+// serviceChecks returns the background service checks for goos. They only
+// warn: a backup run by hand works without the service, so they never make
+// AnyFailed true. svc is nil where the platform has no service manager.
+func serviceChecks(svc Service, goos string) []namedCheck {
+	checks := []namedCheck{{"Daemon Program", func() CheckResult { return checkServiceProgram(svc, goos) }}}
+	if goos == "linux" && svc != nil {
+		checks = append(checks, namedCheck{"Daemon Linger", func() CheckResult { return checkServiceLinger(svc) }})
+	}
+	return checks
+}
+
+// checkServiceProgram checks that the installed unit or plist runs a program
+// that still exists; after a move or an upgrade that removed it, every
+// scheduled run fails before the backup starts (systemd 203/EXEC).
+func checkServiceProgram(svc Service, goos string) CheckResult {
+	const name = "Daemon Program"
+	if svc == nil {
+		return CheckResult{Name: name, Warn: true,
+			Message: fmt.Sprintf("the background service is not supported on %s; schedule `immich-backup backup` yourself", goos)}
+	}
+	def, err := svc.Definition()
+	if err != nil {
+		return CheckResult{Name: name, Warn: true, Message: err.Error(),
+			Remedy: "Re-run `immich-backup daemon install`"}
+	}
+	if def == nil {
+		return CheckResult{Name: name, Warn: true,
+			Message: "the background service is not installed, so no backups are scheduled",
+			Remedy:  "Run `immich-backup daemon install`"}
+	}
+	if def.BinaryPath == "" {
+		return CheckResult{Name: name, Warn: true,
+			Message: fmt.Sprintf("cannot find the program in %s", def.Path),
+			Remedy:  "Re-run `immich-backup daemon install`"}
+	}
+	if err := daemon.CheckProgram(def.BinaryPath); err != nil {
+		return CheckResult{Name: name, Warn: true,
+			Message: fmt.Sprintf("the installed service runs %s: %v", def.BinaryPath, err),
+			Remedy:  "Re-run `immich-backup daemon install` (needed after moving or upgrading immich-backup)"}
+	}
+	return CheckResult{Name: name, OK: true, Message: fmt.Sprintf("the service runs %s", def.BinaryPath)}
+}
+
+// checkServiceLinger checks that systemd keeps the user's timer running
+// after logout, which a headless server depends on.
+func checkServiceLinger(svc Service) CheckResult {
+	const name = "Daemon Linger"
+	st, err := svc.State()
+	if err != nil {
+		return CheckResult{Name: name, Warn: true, Message: fmt.Sprintf("cannot query systemd: %v", err)}
+	}
+	if st.Linger == "yes" {
+		return CheckResult{Name: name, OK: true, Message: "lingering is on: the timer runs while you are logged out"}
+	}
+	return CheckResult{Name: name, Warn: true,
+		Message: fmt.Sprintf("lingering is %s for user %q: systemd stops the backup timer when you log out", st.Linger, st.User),
+		Remedy:  fmt.Sprintf("Run `sudo loginctl enable-linger %s`", st.User)}
+}
+
+// CheckAsync runs the same five checks as Check, then the non-blocking
+// background service checks for svc (nil when the platform has none), and
+// streams progress via ch.
 // A non-nil cfgErr (from config.Load) is reported as the Config check result.
 // For each check it sends CheckStartMsg{Name} then CheckResult.
 // The caller is responsible for closing ch after CheckAsync returns.
@@ -181,11 +256,7 @@ func checkConfigLoad(cfg *config.Config, loadErr error) CheckResult {
 // leak when the TUI exits early (e.g. Ctrl+C) before all checks complete.
 // Note: an in-progress check function itself is not interrupted by ctx — only
 // the sends between checks are guarded.
-func CheckAsync(ctx context.Context, ex docker.Executor, cfg *config.Config, cfgErr error, rcloneConfPath string, ch chan<- any) {
-	type namedCheck struct {
-		name string
-		fn   func() CheckResult
-	}
+func CheckAsync(ctx context.Context, ex docker.Executor, cfg *config.Config, cfgErr error, rcloneConfPath string, svc Service, ch chan<- any) {
 	checks := []namedCheck{
 		{"rclone Binary", checkRcloneBinary},
 		{"rclone Config", func() CheckResult { return checkRcloneConf(rcloneConfPath) }},
@@ -193,6 +264,7 @@ func CheckAsync(ctx context.Context, ex docker.Executor, cfg *config.Config, cfg
 		{"Postgres Container", func() CheckResult { return checkPostgresContainer(ex, cfg.Immich.PostgresContainer) }},
 		{"Config", func() CheckResult { return checkConfigLoad(cfg, cfgErr) }},
 	}
+	checks = append(checks, serviceChecks(svc, runtime.GOOS)...)
 	for _, c := range checks {
 		select {
 		case ch <- CheckStartMsg{Name: c.name}:
@@ -208,10 +280,10 @@ func CheckAsync(ctx context.Context, ex docker.Executor, cfg *config.Config, cfg
 	}
 }
 
-// AnyFailed returns true if any result has OK == false.
+// AnyFailed returns true if any result failed; warnings do not count.
 func AnyFailed(results []CheckResult) bool {
 	for _, r := range results {
-		if !r.OK {
+		if !r.OK && !r.Warn {
 			return true
 		}
 	}

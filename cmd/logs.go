@@ -2,52 +2,44 @@
 package cmd
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"os"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/spf13/cobra"
 	"github.com/daksh7011/immich-backup/internal/config"
+	"github.com/daksh7011/immich-backup/internal/daemon"
 	"github.com/daksh7011/immich-backup/internal/tui"
+	"github.com/spf13/cobra"
 )
 
-// tailFile reads the last maxBytes bytes of the named file.
-// If the file is larger than maxBytes, the result is trimmed to start on a
-// line boundary so no partial log lines are returned.
-func tailFile(name string, maxBytes int64) ([]byte, error) {
-	f, err := os.Open(name)
-	if err != nil {
-		return nil, err
+// daemonLogPath picks the daemon log to show. Only scheduled runs write it,
+// so the file named by the installed unit or plist (def, nil when not
+// installed) wins over the config's daemon.log_path; when the two differ the
+// returned warning says so, since the config changed after `daemon install`.
+// cfgLoaded is false when the config could not be read and cfgPath is only
+// the default.
+func daemonLogPath(cfgPath string, cfgLoaded bool, def *daemon.Definition) (path, warning string) {
+	if def == nil || def.LogPath == "" || def.LogPath == cfgPath {
+		return cfgPath, ""
 	}
-	defer f.Close()
+	if !cfgLoaded {
+		return def.LogPath, ""
+	}
+	return def.LogPath, fmt.Sprintf("warning: the installed service writes to %s, but daemon.log_path is %s; "+
+		"showing the service's log. Run `immich-backup daemon install` to apply the config.", def.LogPath, cfgPath)
+}
 
-	size, err := f.Seek(0, io.SeekEnd)
-	if err != nil {
-		return nil, err
+// printNoLogFile explains a missing log. Only scheduled runs write it, so where
+// the platform has a service manager, point at the commands that show whether
+// runs are scheduled and why they did not start.
+func printNoLogFile(w io.Writer, path string, hasService bool) {
+	fmt.Fprintln(w, "No log file found at", path)
+	if hasService {
+		fmt.Fprintln(w, "No scheduled run has written to it yet. Run `immich-backup daemon status` to see "+
+			"whether runs are scheduled and how the last one ended, and `immich-backup daemon logs` "+
+			"for the scheduler's own messages.")
 	}
-
-	start := size - maxBytes
-	if start < 0 {
-		start = 0
-	}
-	if _, err = f.Seek(start, io.SeekStart); err != nil {
-		return nil, err
-	}
-
-	buf, err := io.ReadAll(f)
-	if err != nil {
-		return nil, err
-	}
-
-	// Drop the first (possibly partial) line when we seeked into the middle.
-	if start > 0 {
-		if i := bytes.IndexByte(buf, '\n'); i >= 0 {
-			buf = buf[i+1:]
-		}
-	}
-	return buf, nil
 }
 
 func newLogsCmd() *cobra.Command {
@@ -58,20 +50,33 @@ func newLogsCmd() *cobra.Command {
 			rclone, _ := cmd.Flags().GetBool("rclone")
 
 			var logPath string
+			var def *daemon.Definition
+			hasService := false
 			if rclone {
 				logPath = config.RcloneLogPath()
 			} else {
 				// logs is in the PersistentPreRun skip list; load config directly.
-				logPath = config.DefaultLogPath()
+				cfgPath, cfgLoaded := config.DefaultLogPath(), false
 				if cfg, err := config.Load(config.DefaultConfigPath()); err == nil {
-					logPath = cfg.Daemon.LogPath
+					cfgPath, cfgLoaded = cfg.Daemon.LogPath, true
+				}
+				// Without a service manager (unsupported OS) or an installed
+				// service, the config's path is all there is.
+				if m, err := daemon.Detect(); err == nil {
+					hasService = true
+					def, _ = m.Definition()
+				}
+				var warning string
+				logPath, warning = daemonLogPath(cfgPath, cfgLoaded, def)
+				if warning != "" {
+					fmt.Fprintln(os.Stderr, warning)
 				}
 			}
 
-			data, err := tailFile(logPath, 1<<20) // last 1 MiB
+			data, err := daemon.TailFile(logPath, 1<<20) // last 1 MiB
 			if err != nil {
 				if os.IsNotExist(err) {
-					fmt.Println("No log file found at", logPath)
+					printNoLogFile(os.Stdout, logPath, hasService)
 					return nil
 				}
 				return fmt.Errorf("read log: %w", err)

@@ -115,10 +115,11 @@ type launchdManager struct {
 	getuid    func() int
 	plistPath func() string
 	sleep     func(time.Duration)
+	now       func() time.Time
 }
 
 func newLaunchdManager() *launchdManager {
-	return &launchdManager{run: execRunner{}, getuid: os.Getuid, plistPath: plistPath, sleep: time.Sleep}
+	return &launchdManager{run: execRunner{}, getuid: os.Getuid, plistPath: plistPath, sleep: time.Sleep, now: time.Now}
 }
 
 // domain is the per-user GUI launchd domain the agent lives in. The legacy
@@ -353,26 +354,4 @@ func (m *launchdManager) Restart() error {
 		return err
 	}
 	return m.activate()
-}
-
-func (m *launchdManager) Status() (string, error) {
-	args := []string{"print", m.target()}
-	out, err := m.run.Run("launchctl", args...)
-	if err != nil {
-		if notLoaded(out, err) {
-			// "Could not find" also covers a missing GUI domain, where
-			// `daemon install` would fail too.
-			if !m.hasGUISession() {
-				return "", m.noGUISessionError()
-			}
-			return "", fmt.Errorf("%s is not loaded: run `immich-backup daemon install` "+
-				"(or `immich-backup daemon start` if it is installed)", m.target())
-		}
-		return string(out), cmdError("launchctl", args, out, err)
-	}
-	return string(out), nil
-}
-
-func (m *launchdManager) Logs() (string, error) {
-	return "", fmt.Errorf("use `immich-backup logs` to view logs")
 }

@@ -115,18 +115,22 @@ func timerPath() string {
 }
 
 type systemdManager struct {
-	run      runner
-	geteuid  func() int
-	getenv   func(string) string
-	username func() (string, error)
+	run       runner
+	geteuid   func() int
+	getenv    func(string) string
+	username  func() (string, error)
+	unitPath  func() string
+	timerPath func() string
 }
 
 func newSystemdManager() *systemdManager {
 	return &systemdManager{
-		run:      execRunner{},
-		geteuid:  os.Geteuid,
-		getenv:   os.Getenv,
-		username: currentUsername,
+		run:       execRunner{},
+		geteuid:   os.Geteuid,
+		getenv:    os.Getenv,
+		username:  currentUsername,
+		unitPath:  unitPath,
+		timerPath: timerPath,
 	}
 }
 
@@ -203,8 +207,8 @@ func (m *systemdManager) Install(cfg *config.Config) error {
 	if err := EnsureLogFile(cfg.Daemon.LogPath); err != nil {
 		return fmt.Errorf("prepare daemon log (check daemon.log_path): %w", err)
 	}
-	uPath := unitPath()
-	tPath := timerPath()
+	uPath := m.unitPath()
+	tPath := m.timerPath()
 	if err := os.MkdirAll(filepath.Dir(uPath), 0755); err != nil {
 		return fmt.Errorf("create systemd user dir: %w", err)
 	}
@@ -224,6 +228,7 @@ func (m *systemdManager) activate() error {
 	if err := m.systemctl("daemon-reload"); err != nil {
 		return err
 	}
+	m.resetFailed()
 	if err := m.systemctl("enable", timerName); err != nil {
 		return err
 	}
@@ -239,11 +244,7 @@ func (m *systemdManager) activate() error {
 // timer never fires once you log out. polkit often refuses enable-linger
 // without root over SSH, so a failure ends in the exact sudo command to run.
 func (m *systemdManager) ensureLinger() error {
-	name, err := m.username()
-	if err != nil {
-		// loginctl accepts a numeric UID wherever it takes a user name.
-		name = strconv.Itoa(m.geteuid())
-	}
+	name := m.lingerUser()
 	// show-user also fails with "not logged in or lingering" when linger is
 	// off, so a failed first check still goes on to enable it.
 	if on, _ := m.lingerEnabled(name); on {
@@ -266,6 +267,14 @@ func (m *systemdManager) ensureLinger() error {
 			"and scheduled backups never run on a headless server (%v). "+
 			"The timer is installed; to keep it running, run:\n  sudo loginctl enable-linger %s",
 		name, cause, name)
+}
+
+// resetFailed clears the failed state a oneshot service keeps until its next
+// run, so `daemon status` stops reporting a failure that a reinstall or
+// restart just fixed (a 203/EXEC or 209/STDOUT). The journal and the log file
+// keep the history. It fails when the service never ran, which is fine.
+func (m *systemdManager) resetFailed() {
+	_ = m.systemctl("reset-failed", unitName)
 }
 
 func (m *systemdManager) lingerEnabled(name string) (bool, error) {
@@ -291,8 +300,8 @@ func (m *systemdManager) Uninstall() error {
 	// here, the goal is only that it is gone.
 	_ = m.systemctl("stop", timerName)
 	_ = m.systemctl("disable", timerName)
-	_ = os.Remove(timerPath())
-	_ = os.Remove(unitPath())
+	_ = os.Remove(m.timerPath())
+	_ = os.Remove(m.unitPath())
 	return m.systemctl("daemon-reload")
 }
 
@@ -314,15 +323,6 @@ func (m *systemdManager) Restart() error {
 	if err := m.preflight(); err != nil {
 		return err
 	}
+	m.resetFailed()
 	return m.systemctl("restart", timerName)
-}
-
-func (m *systemdManager) Status() (string, error) {
-	out, err := m.run.Run("systemctl", "--user", "status", timerName)
-	return string(out), err
-}
-
-func (m *systemdManager) Logs() (string, error) {
-	out, err := m.run.Run("journalctl", "--user", "-u", unitName, "-n", "100")
-	return string(out), err
 }

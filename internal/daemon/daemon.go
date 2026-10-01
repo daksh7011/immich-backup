@@ -42,8 +42,17 @@ type Manager interface {
 	Start() error
 	Stop() error
 	Restart() error
+	// Status describes the schedule, the last scheduled run and the installed
+	// service. It returns the text together with an error listing every
+	// problem that stops scheduled backups.
 	Status() (string, error)
+	// Logs shows the scheduler's own messages and the tail of the log the
+	// scheduled run writes to.
 	Logs() (string, error)
+	// State queries the scheduler; the error means it could not be queried.
+	State() (State, error)
+	// Definition reads the installed unit or plist; nil when not installed.
+	Definition() (*Definition, error)
 }
 
 // runner executes an external command and returns its combined stdout and
@@ -77,15 +86,26 @@ func isSimpleInt(s string) bool {
 	return err == nil
 }
 
-// New returns the platform-appropriate Manager.
-// Panics if the platform is not supported (Windows is out of scope).
-func New() Manager {
+// Detect returns the platform-appropriate Manager, or ErrUnsupported where
+// there is none (Windows is out of scope). Commands use it so they fail with
+// an error instead of panicking.
+func Detect() (Manager, error) {
 	switch runtime.GOOS {
 	case "darwin":
-		return newLaunchdManager()
+		return newLaunchdManager(), nil
 	case "linux":
-		return newSystemdManager()
+		return newSystemdManager(), nil
 	default:
-		panic(fmt.Sprintf("unsupported platform: %s", runtime.GOOS))
+		return nil, ErrUnsupported
 	}
+}
+
+// New returns the platform-appropriate Manager.
+// Panics if the platform is not supported; prefer Detect.
+func New() Manager {
+	m, err := Detect()
+	if err != nil {
+		panic(err)
+	}
+	return m
 }
