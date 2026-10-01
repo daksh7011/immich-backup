@@ -72,3 +72,20 @@ func finishWizard(path, oldSchedule string, cfg *config.Config, saved string) er
 	}
 	return nil
 }
+
+// setupNextSteps returns the hint setup prints after saving: check the
+// prerequisites, then install the background service, since nothing is
+// scheduled until `daemon install` runs. supported is false on a platform
+// without a service manager; installed is only consulted when it is true.
+// An installed service gets no hint (scheduleChangeNotice covers a changed
+// schedule).
+func setupNextSteps(supported bool, installed func() bool) string {
+	if !supported {
+		return "Next: run `immich-backup doctor` to check the prerequisites."
+	}
+	if installed() {
+		return ""
+	}
+	return "Next: run `immich-backup doctor` to check the prerequisites, then\n" +
+		"`immich-backup daemon install` to schedule daily backups."
+}

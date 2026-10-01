@@ -6,6 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/daksh7011/immich-backup/internal/config"
+	"github.com/daksh7011/immich-backup/internal/daemon"
 	"github.com/daksh7011/immich-backup/internal/tui"
 	"github.com/spf13/cobra"
 )
@@ -38,7 +39,14 @@ func newSetupCmd() *cobra.Command {
 				return nil
 			}
 
-			return finishWizard(path, oldSchedule, final.Result(), "Configuration saved to "+path)
+			if err := finishWizard(path, oldSchedule, final.Result(), "Configuration saved to "+path); err != nil {
+				return err
+			}
+			_, detectErr := daemon.Detect()
+			if msg := setupNextSteps(detectErr == nil, serviceInstalled); msg != "" {
+				fmt.Println(msg)
+			}
+			return nil
 		},
 	}
 }

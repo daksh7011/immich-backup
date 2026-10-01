@@ -83,3 +83,28 @@ func TestScheduleChangeNotice_UnchangedDoesNotQueryService(t *testing.T) {
 		return true
 	})
 }
+
+func TestSetupNextSteps(t *testing.T) {
+	yes := func() bool { return true }
+	no := func() bool { return false }
+
+	msg := setupNextSteps(true, no)
+	for _, want := range []string{"immich-backup doctor", "immich-backup daemon install"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("not installed: hint %q does not mention %q", msg, want)
+		}
+	}
+	if msg := setupNextSteps(true, yes); msg != "" {
+		t.Errorf("installed: want no hint, got %q", msg)
+	}
+	msg = setupNextSteps(false, func() bool {
+		t.Error("installed() called on a platform without a service manager")
+		return false
+	})
+	if strings.Contains(msg, "daemon install") {
+		t.Errorf("unsupported platform: hint %q must not suggest daemon install", msg)
+	}
+	if !strings.Contains(msg, "immich-backup doctor") {
+		t.Errorf("unsupported platform: hint %q does not mention doctor", msg)
+	}
+}
