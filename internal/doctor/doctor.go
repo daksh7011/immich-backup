@@ -2,12 +2,16 @@
 package doctor
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
+	"strings"
 
 	"github.com/daksh7011/immich-backup/internal/config"
 	"github.com/daksh7011/immich-backup/internal/docker"
+	"github.com/daksh7011/immich-backup/internal/rclonebin"
 )
 
 // CheckStartMsg is sent on the channel immediately before each check begins.
@@ -26,7 +30,7 @@ type CheckResult struct {
 // It does NOT exit or launch interactive processes — callers decide what to do.
 //
 // Check order:
-//  1. rclone binary in PATH
+//  1. rclone binary in PATH or a well-known install dir
 //  2. rcloneConfPath exists and has ≥1 remote
 //  3. Docker socket accessible
 //  4. Immich Postgres container running
@@ -42,21 +46,41 @@ func Check(ex docker.Executor, cfg *config.Config, rcloneConfPath string) []Chec
 }
 
 func checkRcloneBinary() CheckResult {
-	_, err := exec.LookPath("rclone")
+	path, err := rclonebin.Resolve()
 	if err != nil {
 		return CheckResult{
 			Name:    "rclone Binary",
 			OK:      false,
-			Message: "rclone not found in PATH",
+			Message: err.Error(),
 			Remedy:  "Install rclone: https://rclone.org/install/",
 		}
 	}
-	return CheckResult{Name: "rclone Binary", OK: true, Message: "rclone found"}
+	return CheckResult{Name: "rclone Binary", OK: true, Message: fmt.Sprintf("rclone found at %s", path)}
 }
 
 func checkRcloneConf(path string) CheckResult {
-	out, err := exec.Command("rclone", "listremotes", "--config", path).Output()
-	if err != nil || len(out) == 0 {
+	out, err := exec.Command(rclonebin.Path(), "listremotes", "--config", path).Output()
+	return rcloneConfResult(path, out, err)
+}
+
+// rcloneConfResult turns `rclone listremotes` output into a check result.
+// When rclone itself fails (e.g. an encrypted config with no password), its
+// stderr is reported instead of a misleading "no remotes configured".
+func rcloneConfResult(path string, out []byte, err error) CheckResult {
+	if err != nil {
+		msg := err.Error()
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && len(bytes.TrimSpace(ee.Stderr)) > 0 {
+			msg = strings.TrimSpace(string(ee.Stderr))
+		}
+		return CheckResult{
+			Name:    "rclone Config",
+			OK:      false,
+			Message: fmt.Sprintf("rclone listremotes --config %s failed: %s", path, msg),
+			Remedy:  "Fix the rclone config, or run `immich-backup configure` to recreate the remote",
+		}
+	}
+	if len(bytes.TrimSpace(out)) == 0 {
 		return CheckResult{
 			Name:    "rclone Config",
 			OK:      false,
@@ -72,7 +96,7 @@ func checkDockerSocket(ex docker.Executor) CheckResult {
 		return CheckResult{
 			Name:    "Docker Socket",
 			OK:      false,
-			Message: "Docker socket unreachable (client could not be created)",
+			Message: fmt.Sprintf("Docker socket unreachable at %s (client could not be created)", docker.Host()),
 			Remedy:  "Ensure Docker is running and that your user has socket access",
 		}
 	}
@@ -83,8 +107,10 @@ func checkDockerSocket(ex docker.Executor) CheckResult {
 		return CheckResult{
 			Name:    "Docker Socket",
 			OK:      false,
-			Message: fmt.Sprintf("Docker socket unreachable: %v", err),
-			Remedy:  "Ensure Docker is running and your user has socket access (docker group)",
+			Message: fmt.Sprintf("Docker socket unreachable at %s: %v", docker.Host(), err),
+			Remedy: "Ensure Docker is running and your user has socket access (docker group). " +
+				"For rootless Docker, Colima or Podman, export DOCKER_HOST " +
+				"(e.g. unix://$XDG_RUNTIME_DIR/docker.sock) and re-run `immich-backup daemon install`",
 		}
 	}
 	return CheckResult{Name: "Docker Socket", OK: true, Message: "Docker socket accessible"}

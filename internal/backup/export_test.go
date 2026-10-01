@@ -10,6 +10,6 @@ var MediaSyncArgs = mediaSyncArgs
 // func that restores the previous value.
 func SetRcloneBin(bin string) (restore func()) {
 	prev := rcloneBin
-	rcloneBin = bin
+	rcloneBin = func() string { return bin }
 	return func() { rcloneBin = prev }
 }

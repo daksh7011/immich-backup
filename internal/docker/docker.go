@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/docker/docker/api/types/container"
 	dockerclient "github.com/docker/docker/client"
@@ -20,6 +21,16 @@ type Executor interface {
 // Client is a concrete Executor backed by the Docker Engine SDK.
 type Client struct {
 	cli *dockerclient.Client
+}
+
+// Host returns the Docker endpoint NewClient connects to: DOCKER_HOST when
+// set, otherwise the platform default socket. Used in error messages so a
+// wrong or missing DOCKER_HOST (rootless Docker, Colima) is visible.
+func Host() string {
+	if h := os.Getenv("DOCKER_HOST"); h != "" {
+		return h
+	}
+	return dockerclient.DefaultDockerHost
 }
 
 // NewClient creates a Client connected to the Docker socket via environment

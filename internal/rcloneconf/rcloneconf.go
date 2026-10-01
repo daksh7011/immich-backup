@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/daksh7011/immich-backup/internal/rclonebin"
 )
 
 // EnsureConfigured checks that path contains at least one configured rclone remote.
@@ -44,7 +46,7 @@ func ListRemotes(path string) ([]string, error) {
 
 // listRemotes runs `rclone listremotes --config path` and returns remote names.
 func listRemotes(path string) ([]string, error) {
-	out, err := exec.Command("rclone", "listremotes", "--config", path).Output()
+	out, err := exec.Command(rclonebin.Path(), "listremotes", "--config", path).Output()
 	if err != nil {
 		return nil, fmt.Errorf("rclone listremotes: %w", err)
 	}
@@ -59,7 +61,7 @@ func listRemotes(path string) ([]string, error) {
 
 // launchConfig runs `rclone config` interactively, inheriting the terminal.
 func launchConfig(path string) error {
-	cmd := exec.Command("rclone", "config", "--config", path)
+	cmd := exec.Command(rclonebin.Path(), "config", "--config", path)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

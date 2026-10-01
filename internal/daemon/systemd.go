@@ -22,6 +22,9 @@ After=network.target
 
 [Service]
 Type=oneshot
+{{- range .Env}}
+Environment={{.}}
+{{- end}}
 ExecStart={{.BinaryPath}} backup
 StandardOutput=append:{{.LogPath}}
 StandardError=append:{{.LogPath}}
@@ -39,13 +42,20 @@ Persistent=true
 WantedBy=timers.target
 `))
 
-// GenerateSystemdUnit returns the systemd service unit file content.
+// GenerateSystemdUnit returns the systemd service unit file content. Each
+// env variable becomes a quoted Environment= line; systemd does not expand
+// $VARS there, so values are written literally.
 // Exported for testing.
-func GenerateSystemdUnit(binaryPath string, cfg *config.Config) string {
+func GenerateSystemdUnit(binaryPath string, cfg *config.Config, env ServiceEnv) string {
+	var envLines []string
+	for _, v := range env.vars() {
+		envLines = append(envLines, systemdQuote(v.Key+"="+v.Value))
+	}
 	var buf strings.Builder
-	_ = unitTmpl.Execute(&buf, map[string]string{
+	_ = unitTmpl.Execute(&buf, map[string]any{
 		"BinaryPath": binaryPath,
 		"LogPath":    cfg.Daemon.LogPath,
+		"Env":        envLines,
 	})
 	return buf.String()
 }
@@ -105,7 +115,11 @@ func (m *systemdManager) Install(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("find executable: %w", err)
 	}
-	unit := GenerateSystemdUnit(bin, cfg)
+	env, err := ResolveServiceEnv()
+	if err != nil {
+		return err
+	}
+	unit := GenerateSystemdUnit(bin, cfg, env)
 	timerContent, err := GenerateSystemdTimer(cfg.Backup.Schedule)
 	if err != nil {
 		return fmt.Errorf("generate timer: %w", err)

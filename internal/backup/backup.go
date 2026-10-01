@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/daksh7011/immich-backup/internal/docker"
+	"github.com/daksh7011/immich-backup/internal/rclonebin"
 )
 
 // Message types sent to the TUI channel during a backup run.
@@ -94,9 +95,10 @@ func (e *PartialError) Error() string {
 
 func (e *PartialError) Unwrap() error { return e.Err }
 
-// rcloneBin is the rclone executable invoked for uploads and syncs.
-// A variable so tests can substitute a fake binary.
-var rcloneBin = "rclone"
+// rcloneBin returns the rclone executable invoked for uploads and syncs.
+// It resolves fallback install dirs because scheduled runs get a minimal
+// PATH. A variable so tests can substitute a fake binary.
+var rcloneBin = rclonebin.Path
 
 // dbRemoteDir is the subdirectory of the remote that holds database dumps.
 // The media sync excludes it so `rclone sync` never deletes uploaded dumps.
@@ -242,7 +244,7 @@ func (r *BackupRunner) RunDBUpload(ctx context.Context, dumpPath, remoteDir stri
 		"--use-json-log", "--stats", "1s", "--log-level", "DEBUG",
 		"--transfers", "1",
 	}
-	cmd := exec.CommandContext(ctx, rcloneBin, args...)
+	cmd := exec.CommandContext(ctx, rcloneBin(), args...)
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -370,7 +372,7 @@ func (r *BackupRunner) RunMedia(ctx context.Context, remote, srcDir string, opts
 	}
 
 	// Sync with JSON log streaming.
-	cmd := exec.CommandContext(ctx, rcloneBin, mediaSyncArgs(r.rcloneConf, srcDir, remote, opts)...)
+	cmd := exec.CommandContext(ctx, rcloneBin(), mediaSyncArgs(r.rcloneConf, srcDir, remote, opts)...)
 
 	// cmd.Stdout is intentionally not set: rclone writes nothing meaningful to
 	// stdout when --use-json-log is active, so we let it go to /dev/null.

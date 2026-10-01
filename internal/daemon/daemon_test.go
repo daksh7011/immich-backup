@@ -16,7 +16,7 @@ var testCfg = &config.Config{
 
 func mustPlist(t *testing.T, binaryPath string, cfg *config.Config) string {
 	t.Helper()
-	plist, err := daemon.GeneratePlist(binaryPath, cfg)
+	plist, err := daemon.GeneratePlist(binaryPath, cfg, testEnv)
 	if err != nil {
 		t.Fatalf("GeneratePlist: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestGeneratePlist_StepExpressionReturnsError(t *testing.T) {
 		Backup: config.BackupConfig{Schedule: "0 */4 * * *"},
 		Daemon: config.DaemonConfig{LogPath: "/tmp/daemon.log"},
 	}
-	_, err := daemon.GeneratePlist("/usr/local/bin/immich-backup", cfg)
+	_, err := daemon.GeneratePlist("/usr/local/bin/immich-backup", cfg, testEnv)
 	if err == nil {
 		t.Error("expected error for step expression in hour field, got nil")
 	}
@@ -74,7 +74,7 @@ func TestGeneratePlist_SimpleHourMinute_ProducesIntegers(t *testing.T) {
 }
 
 func TestGenerateSystemdUnit_ContainsExecStart(t *testing.T) {
-	unit := daemon.GenerateSystemdUnit("/usr/local/bin/immich-backup", testCfg)
+	unit := daemon.GenerateSystemdUnit("/usr/local/bin/immich-backup", testCfg, testEnv)
 	if !strings.Contains(unit, "ExecStart=/usr/local/bin/immich-backup") {
 		t.Errorf("unit missing ExecStart: %s", unit)
 	}
@@ -82,7 +82,7 @@ func TestGenerateSystemdUnit_ContainsExecStart(t *testing.T) {
 
 func TestGenerateSystemdUnit_NoWantedByDefaultTarget(t *testing.T) {
 	// The service file must NOT have WantedBy=default.target — the timer drives scheduling.
-	unit := daemon.GenerateSystemdUnit("/usr/local/bin/immich-backup", testCfg)
+	unit := daemon.GenerateSystemdUnit("/usr/local/bin/immich-backup", testCfg, testEnv)
 	if strings.Contains(unit, "WantedBy=default.target") {
 		t.Error("service unit must not have WantedBy=default.target; scheduling is driven by the timer")
 	}

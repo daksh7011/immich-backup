@@ -2,6 +2,7 @@
 package daemon
 
 import (
+	"encoding/xml"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,7 +17,7 @@ import (
 const plistLabel = "com.immich-backup.agent"
 const plistFilename = plistLabel + ".plist"
 
-var plistTmpl = template.Must(template.New("plist").Parse(`<?xml version="1.0" encoding="UTF-8"?>
+var plistTmpl = template.Must(template.New("plist").Funcs(template.FuncMap{"xml": xmlEscape}).Parse(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
     "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -41,6 +42,15 @@ var plistTmpl = template.Must(template.New("plist").Parse(`<?xml version="1.0" e
     <string>{{.LogPath}}</string>
     <key>RunAtLoad</key>
     <false/>
+{{- if .Env}}
+    <key>EnvironmentVariables</key>
+    <dict>
+{{- range .Env}}
+        <key>{{xml .Key}}</key>
+        <string>{{xml .Value}}</string>
+{{- end}}
+    </dict>
+{{- end}}
 </dict>
 </plist>
 `))
@@ -48,8 +58,10 @@ var plistTmpl = template.Must(template.New("plist").Parse(`<?xml version="1.0" e
 // GeneratePlist returns the launchd plist XML for the given binary path and config.
 // Returns an error if the schedule uses step, range, or list expressions in the
 // minute or hour fields — launchd requires plain integers in StartCalendarInterval.
+// env becomes the EnvironmentVariables dict, since launchd gives jobs only
+// PATH=/usr/bin:/bin:/usr/sbin:/sbin.
 // Exported for testing.
-func GeneratePlist(binaryPath string, cfg *config.Config) (string, error) {
+func GeneratePlist(binaryPath string, cfg *config.Config, env ServiceEnv) (string, error) {
 	parts := strings.Fields(cfg.Backup.Schedule)
 	if len(parts) != 5 {
 		return "", fmt.Errorf("schedule must have exactly 5 cron fields, got %d", len(parts))
@@ -64,16 +76,24 @@ func GeneratePlist(binaryPath string, cfg *config.Config) (string, error) {
 	}
 
 	var buf strings.Builder
-	if err := plistTmpl.Execute(&buf, map[string]string{
+	if err := plistTmpl.Execute(&buf, map[string]any{
 		"Label":      plistLabel,
 		"BinaryPath": binaryPath,
 		"Hour":       hour,
 		"Minute":     minute,
 		"LogPath":    cfg.Daemon.LogPath,
+		"Env":        env.vars(),
 	}); err != nil {
 		return "", fmt.Errorf("render plist template: %w", err)
 	}
 	return buf.String(), nil
+}
+
+// xmlEscape escapes s for use as plist element text.
+func xmlEscape(s string) string {
+	var b strings.Builder
+	_ = xml.EscapeText(&b, []byte(s))
+	return b.String()
 }
 
 func plistPath() string {
@@ -88,7 +108,11 @@ func (m *launchdManager) Install(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("find executable: %w", err)
 	}
-	plist, err := GeneratePlist(bin, cfg)
+	env, err := ResolveServiceEnv()
+	if err != nil {
+		return err
+	}
+	plist, err := GeneratePlist(bin, cfg, env)
 	if err != nil {
 		return fmt.Errorf("generate plist: %w", err)
 	}
