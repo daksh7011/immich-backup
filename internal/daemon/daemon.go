@@ -3,11 +3,35 @@ package daemon
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 
 	"github.com/daksh7011/immich-backup/internal/config"
 )
+
+// EnsureLogFile creates the daemon log file and its parent directories if
+// missing, without truncating an existing log. systemd (append:) and launchd
+// (StandardOutPath) open the log before running the job and do not create
+// parent directories, so a missing dir makes every scheduled run fail before
+// the binary starts (systemd 209/STDOUT, launchd exit 78).
+func EnsureLogFile(path string) error {
+	if path == "" {
+		return fmt.Errorf("daemon log path is empty; set daemon.log_path in the config")
+	}
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("daemon log path %q must be absolute", path)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("create log dir: %w", err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("create log file: %w", err)
+	}
+	return f.Close()
+}
 
 // Manager controls the immich-backup background service.
 type Manager interface {

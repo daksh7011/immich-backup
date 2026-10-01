@@ -92,6 +92,9 @@ func (m *launchdManager) Install(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("generate plist: %w", err)
 	}
+	if err := EnsureLogFile(cfg.Daemon.LogPath); err != nil {
+		return fmt.Errorf("prepare daemon log (check daemon.log_path): %w", err)
+	}
 	path := plistPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return fmt.Errorf("create LaunchAgents dir: %w", err)

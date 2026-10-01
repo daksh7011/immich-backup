@@ -110,6 +110,9 @@ func (m *systemdManager) Install(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("generate timer: %w", err)
 	}
+	if err := EnsureLogFile(cfg.Daemon.LogPath); err != nil {
+		return fmt.Errorf("prepare daemon log (check daemon.log_path): %w", err)
+	}
 	uPath := unitPath()
 	tPath := timerPath()
 	if err := os.MkdirAll(filepath.Dir(uPath), 0755); err != nil {

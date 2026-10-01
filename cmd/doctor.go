@@ -18,7 +18,9 @@ func newDoctorCmd() *cobra.Command {
 		Use:   "doctor",
 		Short: "Check all prerequisites and display results",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, _ := config.Load(config.DefaultConfigPath())
+			// A load error is shown as the failed Config check; the empty
+			// fallback only keeps the other checks running.
+			cfg, cfgErr := config.Load(config.DefaultConfigPath())
 			if cfg == nil {
 				cfg = &config.Config{}
 			}
@@ -39,7 +41,7 @@ func newDoctorCmd() *cobra.Command {
 
 			ch := make(chan any, 10)
 			go func() {
-				doctor.CheckAsync(ctx, ex, cfg, config.RcloneConfigPath(), ch)
+				doctor.CheckAsync(ctx, ex, cfg, cfgErr, config.RcloneConfigPath(), ch)
 				close(ch)
 			}()
 

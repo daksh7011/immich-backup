@@ -132,14 +132,30 @@ func checkConfig(cfg *config.Config) CheckResult {
 	return CheckResult{Name: "Config", OK: true, Message: "config is valid"}
 }
 
+// checkConfigLoad reports loadErr (a parse or validation error from
+// config.Load) as the failed Config check, so doctor names the real problem
+// instead of validating the empty fallback config.
+func checkConfigLoad(cfg *config.Config, loadErr error) CheckResult {
+	if loadErr != nil {
+		return CheckResult{
+			Name:    "Config",
+			OK:      false,
+			Message: fmt.Sprintf("config load failed: %v", loadErr),
+			Remedy:  "Run `immich-backup configure` or edit ~/.immich-backup/config.yaml",
+		}
+	}
+	return checkConfig(cfg)
+}
+
 // CheckAsync runs the same five checks as Check but streams progress via ch.
+// A non-nil cfgErr (from config.Load) is reported as the Config check result.
 // For each check it sends CheckStartMsg{Name} then CheckResult.
 // The caller is responsible for closing ch after CheckAsync returns.
 // ctx cancellation stops further checks and channel sends, preventing a goroutine
 // leak when the TUI exits early (e.g. Ctrl+C) before all checks complete.
 // Note: an in-progress check function itself is not interrupted by ctx — only
 // the sends between checks are guarded.
-func CheckAsync(ctx context.Context, ex docker.Executor, cfg *config.Config, rcloneConfPath string, ch chan<- any) {
+func CheckAsync(ctx context.Context, ex docker.Executor, cfg *config.Config, cfgErr error, rcloneConfPath string, ch chan<- any) {
 	type namedCheck struct {
 		name string
 		fn   func() CheckResult
@@ -149,7 +165,7 @@ func CheckAsync(ctx context.Context, ex docker.Executor, cfg *config.Config, rcl
 		{"rclone Config", func() CheckResult { return checkRcloneConf(rcloneConfPath) }},
 		{"Docker Socket", func() CheckResult { return checkDockerSocket(ex) }},
 		{"Postgres Container", func() CheckResult { return checkPostgresContainer(ex, cfg.Immich.PostgresContainer) }},
-		{"Config", func() CheckResult { return checkConfig(cfg) }},
+		{"Config", func() CheckResult { return checkConfigLoad(cfg, cfgErr) }},
 	}
 	for _, c := range checks {
 		select {

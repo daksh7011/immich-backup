@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/daksh7011/immich-backup/internal/backup"
 	"github.com/daksh7011/immich-backup/internal/config"
+	"github.com/daksh7011/immich-backup/internal/daemon"
 	"github.com/daksh7011/immich-backup/internal/docker"
 	"github.com/daksh7011/immich-backup/internal/doctor"
 	"github.com/daksh7011/immich-backup/internal/rcloneconf"
@@ -29,6 +30,14 @@ func newBackupCmd() *cobra.Command {
 		Short: "Run a backup now",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := GetConfig(cmd)
+
+			// Create the daemon log before anything can fail, so a manual run
+			// repairs a missing log dir that would stop scheduled runs from starting.
+			if err := daemon.EnsureLogFile(cfg.Daemon.LogPath); err != nil {
+				slog.Error("cannot create daemon log", "error", err,
+					"remedy", "check daemon.log_path in ~/.immich-backup/config.yaml and its directory permissions")
+				os.Exit(1)
+			}
 
 			// Prerequisite checks — fail fast
 			client, err := docker.NewClient()

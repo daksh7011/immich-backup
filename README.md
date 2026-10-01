@@ -90,8 +90,10 @@ backup:
     weekly: 4
 
 daemon:
-  log_path: ~/.immich-backup/logs/daemon.log
+  log_path: ~/.immich-backup/logs/daemon.log   # must be absolute; a leading ~/ is expanded
 ```
+
+`daemon.log_path` defaults to `~/.immich-backup/logs/daemon.log` when omitted. A leading `~/` (in `log_path` and `upload_location`) is expanded to your home directory when the config is loaded; any other relative `log_path` is rejected. `daemon install` creates the log directory and file, since systemd and launchd will not start the job if it is missing.
 
 ### rclone configuration
 

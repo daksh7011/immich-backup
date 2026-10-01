@@ -90,7 +90,14 @@ func Load(path string) (*Config, error) {
 
 // applyDefaults fills in zero-value perf fields with built-in defaults.
 // This ensures legacy configs (without transfers/checkers/buffer_size) load cleanly.
+// It also defaults daemon.log_path and expands a leading "~" in path fields:
+// systemd and launchd take the log path literally and never expand "~".
 func applyDefaults(cfg *Config) {
+	if cfg.Daemon.LogPath == "" {
+		cfg.Daemon.LogPath = DefaultLogPath()
+	}
+	cfg.Daemon.LogPath = expandHome(cfg.Daemon.LogPath)
+	cfg.Immich.UploadLocation = expandHome(cfg.Immich.UploadLocation)
 	if cfg.Backup.Transfers == 0 {
 		cfg.Backup.Transfers = defaults.Backup.Transfers
 	}
@@ -136,10 +143,32 @@ func (c *Config) Validate() error {
 	if c.Backup.Checkers <= 0         { errs = append(errs, "backup.checkers must be > 0") }
 	if c.Backup.BufferSize == ""       { errs = append(errs, "backup.buffer_size is required") }
 	if c.Daemon.LogPath == ""          { errs = append(errs, "daemon.log_path is required") }
+	if c.Daemon.LogPath != "" && !isAbsPath(c.Daemon.LogPath) {
+		errs = append(errs, fmt.Sprintf("daemon.log_path must be an absolute path (got %q)", c.Daemon.LogPath))
+	}
 	if len(errs) > 0 {
 		return fmt.Errorf("config validation failed:\n  - %s", strings.Join(errs, "\n  - "))
 	}
 	return nil
+}
+
+// expandHome replaces a leading "~" or "~/" in p with the user's home dir.
+// "~user/..." forms are left alone (and then rejected as relative by Validate).
+func expandHome(p string) string {
+	if p != "~" && !strings.HasPrefix(p, "~/") {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return p
+	}
+	return filepath.Join(home, strings.TrimPrefix(p, "~"))
+}
+
+// isAbsPath reports whether p is absolute. A leading "/" always counts, so a
+// config written for the Linux/macOS host also validates when tests run on Windows.
+func isAbsPath(p string) bool {
+	return filepath.IsAbs(p) || strings.HasPrefix(p, "/")
 }
 
 func validCron(expr string) bool {
