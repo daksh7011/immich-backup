@@ -25,7 +25,7 @@ Type=oneshot
 {{- range .Env}}
 Environment={{.}}
 {{- end}}
-ExecStart={{.BinaryPath}} backup
+ExecStart={{.ExecPath}} backup
 StandardOutput=append:{{.LogPath}}
 StandardError=append:{{.LogPath}}
 `))
@@ -42,9 +42,11 @@ Persistent=true
 WantedBy=timers.target
 `))
 
-// GenerateSystemdUnit returns the systemd service unit file content. Each
-// env variable becomes a quoted Environment= line; systemd does not expand
-// $VARS there, so values are written literally.
+// GenerateSystemdUnit returns the systemd service unit file content. The
+// binary path is quoted so spaces survive ExecStart word splitting, and % is
+// escaped as %% there and in the log path so systemd does not expand it as a
+// specifier. Each env variable becomes a quoted Environment= line; systemd
+// does not expand $VARS there, so values are written literally.
 // Exported for testing.
 func GenerateSystemdUnit(binaryPath string, cfg *config.Config, env ServiceEnv) string {
 	var envLines []string
@@ -53,9 +55,9 @@ func GenerateSystemdUnit(binaryPath string, cfg *config.Config, env ServiceEnv) 
 	}
 	var buf strings.Builder
 	_ = unitTmpl.Execute(&buf, map[string]any{
-		"BinaryPath": binaryPath,
-		"LogPath":    cfg.Daemon.LogPath,
-		"Env":        envLines,
+		"ExecPath": systemdQuote(binaryPath),
+		"LogPath":  strings.ReplaceAll(cfg.Daemon.LogPath, "%", "%%"),
+		"Env":      envLines,
 	})
 	return buf.String()
 }
@@ -111,9 +113,12 @@ func timerPath() string {
 type systemdManager struct{}
 
 func (m *systemdManager) Install(cfg *config.Config) error {
-	bin, err := os.Executable()
+	bin, err := StableExecutable()
 	if err != nil {
-		return fmt.Errorf("find executable: %w", err)
+		return err
+	}
+	if err := checkUnitPath(cfg.Daemon.LogPath); err != nil {
+		return fmt.Errorf("check daemon.log_path: %w", err)
 	}
 	env, err := ResolveServiceEnv()
 	if err != nil {

@@ -75,7 +75,7 @@ func TestGeneratePlist_SimpleHourMinute_ProducesIntegers(t *testing.T) {
 
 func TestGenerateSystemdUnit_ContainsExecStart(t *testing.T) {
 	unit := daemon.GenerateSystemdUnit("/usr/local/bin/immich-backup", testCfg, testEnv)
-	if !strings.Contains(unit, "ExecStart=/usr/local/bin/immich-backup") {
+	if !strings.Contains(unit, `ExecStart="/usr/local/bin/immich-backup" backup`) {
 		t.Errorf("unit missing ExecStart: %s", unit)
 	}
 }

@@ -23,23 +23,23 @@ var plistTmpl = template.Must(template.New("plist").Funcs(template.FuncMap{"xml"
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>{{.Label}}</string>
+    <string>{{xml .Label}}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{{.BinaryPath}}</string>
+        <string>{{xml .BinaryPath}}</string>
         <string>backup</string>
     </array>
     <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key>
-        <integer>{{.Hour}}</integer>
+        <integer>{{xml .Hour}}</integer>
         <key>Minute</key>
-        <integer>{{.Minute}}</integer>
+        <integer>{{xml .Minute}}</integer>
     </dict>
     <key>StandardOutPath</key>
-    <string>{{.LogPath}}</string>
+    <string>{{xml .LogPath}}</string>
     <key>StandardErrorPath</key>
-    <string>{{.LogPath}}</string>
+    <string>{{xml .LogPath}}</string>
     <key>RunAtLoad</key>
     <false/>
 {{- if .Env}}
@@ -59,7 +59,8 @@ var plistTmpl = template.Must(template.New("plist").Funcs(template.FuncMap{"xml"
 // Returns an error if the schedule uses step, range, or list expressions in the
 // minute or hour fields — launchd requires plain integers in StartCalendarInterval.
 // env becomes the EnvironmentVariables dict, since launchd gives jobs only
-// PATH=/usr/bin:/bin:/usr/sbin:/sbin.
+// PATH=/usr/bin:/bin:/usr/sbin:/sbin. Every value is XML-escaped, so paths
+// containing & or < still produce a valid plist.
 // Exported for testing.
 func GeneratePlist(binaryPath string, cfg *config.Config, env ServiceEnv) (string, error) {
 	parts := strings.Fields(cfg.Backup.Schedule)
@@ -104,9 +105,9 @@ func plistPath() string {
 type launchdManager struct{}
 
 func (m *launchdManager) Install(cfg *config.Config) error {
-	bin, err := os.Executable()
+	bin, err := StableExecutable()
 	if err != nil {
-		return fmt.Errorf("find executable: %w", err)
+		return err
 	}
 	env, err := ResolveServiceEnv()
 	if err != nil {
