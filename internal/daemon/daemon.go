@@ -82,7 +82,7 @@ func isSimpleInt(s string) bool {
 func New() Manager {
 	switch runtime.GOOS {
 	case "darwin":
-		return &launchdManager{}
+		return newLaunchdManager()
 	case "linux":
 		return newSystemdManager()
 	default:

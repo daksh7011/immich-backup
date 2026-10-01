@@ -16,16 +16,16 @@ func newDaemonCmd() *cobra.Command {
 		Short: "Manage the immich-backup background service",
 	}
 
-	cmd.AddCommand(newDaemonSubCmd("install", "Install and enable the background service", "Installing service…",
-		func(c *cobra.Command) error { return daemon.New().Install(GetConfig(c)) }))
-	cmd.AddCommand(newDaemonSubCmd("uninstall", "Remove the background service", "Uninstalling service…",
-		func(c *cobra.Command) error { return daemon.New().Uninstall() }))
+	cmd.AddCommand(interruptsOnMac(newDaemonSubCmd("install", "Install and enable the background service", "Installing service…",
+		func(c *cobra.Command) error { return daemon.New().Install(GetConfig(c)) })))
+	cmd.AddCommand(interruptsOnMac(newDaemonSubCmd("uninstall", "Remove the background service", "Uninstalling service…",
+		func(c *cobra.Command) error { return daemon.New().Uninstall() })))
 	cmd.AddCommand(newDaemonSubCmd("start", "Start the background service", "Starting service…",
 		func(c *cobra.Command) error { return daemon.New().Start() }))
-	cmd.AddCommand(newDaemonSubCmd("stop", "Stop the background service", "Stopping service…",
-		func(c *cobra.Command) error { return daemon.New().Stop() }))
-	cmd.AddCommand(newDaemonSubCmd("restart", "Restart the background service", "Restarting service…",
-		func(c *cobra.Command) error { return daemon.New().Restart() }))
+	cmd.AddCommand(interruptsOnMac(newDaemonSubCmd("stop", "Stop the background service", "Stopping service…",
+		func(c *cobra.Command) error { return daemon.New().Stop() })))
+	cmd.AddCommand(interruptsOnMac(newDaemonSubCmd("restart", "Restart the background service", "Restarting service…",
+		func(c *cobra.Command) error { return daemon.New().Restart() })))
 
 	cmd.AddCommand(&cobra.Command{
 		Use:   "status",
@@ -59,6 +59,15 @@ func newDaemonCmd() *cobra.Command {
 	})
 
 	return cmd
+}
+
+// interruptsOnMac documents that the command unloads the launchd job, which
+// stops a backup that is running right now. On Linux these commands act only
+// on the timer, so a running backup finishes.
+func interruptsOnMac(c *cobra.Command) *cobra.Command {
+	c.Long = c.Short + ".\n\nOn macOS this unloads the launchd job, which interrupts a backup " +
+		"that is running at that moment; on Linux a running backup is left to finish."
+	return c
 }
 
 // newDaemonSubCmd creates a daemon subcommand that runs fn in a goroutine and

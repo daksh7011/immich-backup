@@ -1,5 +1,7 @@
 package daemon
 
+import "time"
+
 // Test-only hooks for the external daemon_test package.
 
 // ResolveServiceEnvWith exposes resolveServiceEnv with injectable rclone
@@ -34,3 +36,17 @@ func (m *systemdManager) Preflight() error { return m.preflight() }
 
 // ParseLinger exposes parseLinger.
 var ParseLinger = parseLinger
+
+// LaunchdManager exposes launchdManager so tests can drive it with a fake
+// command runner.
+type LaunchdManager = launchdManager
+
+// NewLaunchdManagerWith builds a launchd manager with an injected command
+// runner, uid and plist path.
+func NewLaunchdManagerWith(r runner, getuid func() int, plistPath func() string) *LaunchdManager {
+	return &launchdManager{run: r, getuid: getuid, plistPath: plistPath, sleep: func(time.Duration) {}}
+}
+
+// Activate exposes the bootout, enable, bootstrap and verify sequence of
+// Install.
+func (m *launchdManager) Activate() error { return m.activate() }
