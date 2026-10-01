@@ -45,6 +45,16 @@ func (m StatusModel) View() tea.View {
 		out += fmt.Sprintf("  %s  %s\n",
 			dimStyle.Render("Last run:"),
 			dimStyle.Render(m.run.Time.Format("2006-01-02 15:04:05"))+" "+resultStyle.Render("["+m.run.Result+"]"))
+		if m.run.Result != status.ResultSuccess {
+			// The last attempt failed: say when data was last backed up in full.
+			lastOK := "never recorded"
+			if !m.run.LastSuccess.IsZero() {
+				lastOK = m.run.LastSuccess.Format("2006-01-02 15:04:05")
+			}
+			out += fmt.Sprintf("  %s  %s\n",
+				dimStyle.Render("Last ok: "),
+				dimStyle.Render(lastOK))
+		}
 		out += fmt.Sprintf("  %s  %s\n",
 			dimStyle.Render("Next run:"),
 			dimStyle.Render(m.nextRun))

@@ -3,6 +3,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -53,13 +54,13 @@ func currentDir() string {
 	return cwd
 }
 
-func printBanner() {
+func printBanner(w io.Writer) {
 	dot := dotStyle.Render("  ·  ")
 
-	fmt.Println()
-	fmt.Println(artStyle.Render(asciiArt))
-	fmt.Println()
-	fmt.Println("  " + nameStyle.Render("immich-backup") + dot + versionStyle.Render(versionLabel()) + dot + dirStyle.Render(currentDir()))
-	fmt.Println("  " + subStyle.Render("rclone-powered backup for your Immich library"))
-	fmt.Println()
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, artStyle.Render(asciiArt))
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "  "+nameStyle.Render("immich-backup")+dot+versionStyle.Render(versionLabel())+dot+dirStyle.Render(currentDir()))
+	fmt.Fprintln(w, "  "+subStyle.Render("rclone-powered backup for your Immich library"))
+	fmt.Fprintln(w)
 }
