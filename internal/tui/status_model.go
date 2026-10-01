@@ -35,9 +35,12 @@ func (m StatusModel) View() tea.View {
 	if m.run == nil {
 		out += "  " + dimStyle.Render("No backup has run yet.") + "\n"
 	} else {
-		resultStyle := okStyle
-		if m.run.Result != "success" {
-			resultStyle = errStyle
+		resultStyle := errStyle
+		switch m.run.Result {
+		case status.ResultSuccess:
+			resultStyle = okStyle
+		case status.ResultPartial:
+			resultStyle = warnStyle
 		}
 		out += fmt.Sprintf("  %s  %s\n",
 			dimStyle.Render("Last run:"),

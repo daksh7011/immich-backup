@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -78,6 +79,33 @@ type DBUploadProgressMsg struct {
 type RcloneErrorMsg struct {
 	Text string
 }
+
+// PartialError reports a media sync where rclone skipped some files
+// (--ignore-errors) and exited non-zero. The rest of the library was synced,
+// but the run is incomplete and must not be recorded as a success.
+type PartialError struct {
+	FileErrors int   // error-level lines rclone logged
+	Err        error // rclone's exit error
+}
+
+func (e *PartialError) Error() string {
+	return fmt.Sprintf("incomplete: %d file error(s), %v", e.FileErrors, e.Err)
+}
+
+func (e *PartialError) Unwrap() error { return e.Err }
+
+// rcloneBin is the rclone executable invoked for uploads and syncs.
+// A variable so tests can substitute a fake binary.
+var rcloneBin = "rclone"
+
+// dbRemoteDir is the subdirectory of the remote that holds database dumps.
+// The media sync excludes it so `rclone sync` never deletes uploaded dumps.
+const dbRemoteDir = "db"
+
+// rclone exit codes that mean the whole run failed, as opposed to individual
+// files being skipped: 2 = syntax/usage error, 3 = directory not found,
+// 7 = fatal error (e.g. account suspended). See https://rclone.org/docs/#exit-code
+var rcloneFatalExitCodes = map[int]bool{2: true, 3: true, 7: true}
 
 // Private JSON structs used only inside this package.
 type rcloneLogLine struct {
@@ -214,7 +242,7 @@ func (r *BackupRunner) RunDBUpload(ctx context.Context, dumpPath, remoteDir stri
 		"--use-json-log", "--stats", "1s", "--log-level", "DEBUG",
 		"--transfers", "1",
 	}
-	cmd := exec.CommandContext(ctx, "rclone", args...)
+	cmd := exec.CommandContext(ctx, rcloneBin, args...)
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -265,14 +293,48 @@ func (r *BackupRunner) RunDBUpload(ctx context.Context, dumpPath, remoteDir stri
 	return nil
 }
 
-// RunMedia syncs srcDir to remote using rclone sync with JSON logging.
-// Progress and file-level errors are sent to ch. ch may be nil (progress is silently discarded).
-// If ctx is cancelled the rclone subprocess is killed immediately.
-func (r *BackupRunner) RunMedia(ctx context.Context, remote, srcDir string, opts MediaOpts, ch chan<- any) error {
-	// Sync with JSON log streaming.
-	args := []string{
-		"--config", r.rcloneConf,
+// CheckUploadLocation verifies that dir exists, is a readable directory and
+// contains at least one entry. rclone sync mirrors deletions, so syncing from
+// an unmounted volume or an unreadable path (e.g. macOS privacy denial) would
+// wipe the remote copy of the library — refuse instead.
+func CheckUploadLocation(dir string) error {
+	if dir == "" {
+		return fmt.Errorf("upload_location is not set")
+	}
+	info, err := os.Stat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("upload_location %s does not exist (is the volume mounted?)", dir)
+	}
+	if err != nil {
+		return fmt.Errorf("upload_location %s: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("upload_location %s is not a directory", dir)
+	}
+	f, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("upload_location %s is not readable: %w", dir, err)
+	}
+	defer f.Close()
+	names, err := f.Readdirnames(1)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("upload_location %s is not readable: %w", dir, err)
+	}
+	if len(names) == 0 {
+		return fmt.Errorf("upload_location %s is empty (is the volume mounted?); refusing to sync and delete remote media", dir)
+	}
+	return nil
+}
+
+// mediaSyncArgs builds the rclone argv for the media sync. The remote's db/
+// subdirectory is excluded: it holds the dumps uploaded by RunDBUpload, and
+// without the exclude `rclone sync` would delete them as extraneous files.
+// Excluded files are left untouched on the remote (no --delete-excluded).
+func mediaSyncArgs(rcloneConf, srcDir, remote string, opts MediaOpts) []string {
+	return []string{
+		"--config", rcloneConf,
 		"sync", srcDir, remote,
+		"--exclude", "/" + dbRemoteDir + "/**",
 		"--use-json-log", "--stats", "1s", "--log-level", "DEBUG",
 		"--ignore-errors",
 		"--fast-list",
@@ -280,7 +342,35 @@ func (r *BackupRunner) RunMedia(ctx context.Context, remote, srcDir string, opts
 		"--checkers", strconv.Itoa(opts.Checkers),
 		"--buffer-size", opts.BufferSize,
 	}
-	cmd := exec.CommandContext(ctx, "rclone", args...)
+}
+
+// mediaSyncResult maps rclone's exit status to RunMedia's error. Any non-zero
+// exit is an error; it is a *PartialError only when rclone reported file-level
+// errors and the exit code is not one that means the whole run failed.
+// A zero exit is success even if errors were logged: rclone logs failed
+// attempts at error level and then succeeds on retry.
+func mediaSyncResult(waitErr error, fileErrors int) error {
+	if waitErr == nil {
+		return nil
+	}
+	var exitErr *exec.ExitError
+	if fileErrors > 0 && errors.As(waitErr, &exitErr) && !rcloneFatalExitCodes[exitErr.ExitCode()] {
+		return fmt.Errorf("rclone sync: %w", &PartialError{FileErrors: fileErrors, Err: waitErr})
+	}
+	return fmt.Errorf("rclone sync: %w", waitErr)
+}
+
+// RunMedia syncs srcDir to remote using rclone sync with JSON logging.
+// Progress and file-level errors are sent to ch. ch may be nil (progress is silently discarded).
+// If ctx is cancelled the rclone subprocess is killed immediately.
+// A non-zero rclone exit always returns an error; see mediaSyncResult.
+func (r *BackupRunner) RunMedia(ctx context.Context, remote, srcDir string, opts MediaOpts, ch chan<- any) error {
+	if err := CheckUploadLocation(srcDir); err != nil {
+		return err
+	}
+
+	// Sync with JSON log streaming.
+	cmd := exec.CommandContext(ctx, rcloneBin, mediaSyncArgs(r.rcloneConf, srcDir, remote, opts)...)
 
 	// cmd.Stdout is intentionally not set: rclone writes nothing meaningful to
 	// stdout when --use-json-log is active, so we let it go to /dev/null.
@@ -315,15 +405,7 @@ func (r *BackupRunner) RunMedia(ctx context.Context, remote, srcDir string, opts
 		return fmt.Errorf("rclone stderr read: %w", err)
 	}
 
-	if err := cmd.Wait(); err != nil && fileErrors == 0 {
-		// Non-zero exit with no captured RcloneErrorMsg values means a fatal rclone
-		// error (e.g. auth failure, missing remote). Those errors appear as critical-
-		// level or plain-text stderr before JSON logging is active, so fileErrors
-		// stays 0 and we surface the exit error. If fileErrors > 0, rclone exited 1
-		// due to --ignore-errors skipping files — that's expected partial success.
-		return fmt.Errorf("rclone sync: %w", err)
-	}
-	return nil
+	return mediaSyncResult(cmd.Wait(), fileErrors)
 }
 
 // Run orchestrates a full backup: database dump → upload dump → media sync.
@@ -365,7 +447,7 @@ func Run(
 		}
 
 		send(PhaseMsg{Phase: PhaseDBUpload})
-		remoteDBDir := rcloneRemote + "/db"
+		remoteDBDir := rcloneRemote + "/" + dbRemoteDir
 		uploadErr := r.RunDBUpload(ctx, dumpPath, remoteDBDir, ch)
 		_ = os.Remove(dumpPath) // best-effort; uploaded or failed, temp file is no longer needed
 		if uploadErr != nil {

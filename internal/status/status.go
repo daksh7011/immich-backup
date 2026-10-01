@@ -9,10 +9,17 @@ import (
 	"time"
 )
 
+// Values of LastRun.Result. Persisted in last-run.json — do not change.
+const (
+	ResultSuccess = "success"
+	ResultPartial = "partial" // media sync finished but rclone skipped some files
+	ResultError   = "error"
+)
+
 // LastRun holds the result of the most recent backup run.
 type LastRun struct {
 	Time   time.Time `json:"time"`
-	Result string    `json:"result"` // "success" | "error"
+	Result string    `json:"result"` // ResultSuccess | ResultPartial | ResultError
 	Error  string    `json:"error,omitempty"`
 }
 

@@ -3,6 +3,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -125,7 +126,13 @@ func newBackupCmd() *cobra.Command {
 				ch,
 			)
 
+			// From here on errors are runtime failures, not misuse: skip the usage
+			// dump, and let Execute print the error once (exit code 1).
+			cmd.SilenceUsage = true
+			cmd.SilenceErrors = true
+
 			run := &status.LastRun{Time: time.Now().UTC()}
+			var runErr error
 			if isTTY() {
 				model := tui.NewBackupModel(ch, cancel, skipDB, skipMedia)
 				p := tea.NewProgram(model)
@@ -136,29 +143,41 @@ func newBackupCmd() *cobra.Command {
 					return fmt.Errorf("backup TUI: %w", err)
 				}
 				final := result.(tui.BackupModel)
-				if final.Err() != nil {
-					run.Result = "error"
-					run.Error = final.Err().Error()
-				} else {
-					run.Result = "success"
+				runErr = final.Err()
+				if runErr == nil && ctx.Err() != nil {
+					// Ctrl+C: the model cancelled ctx and quit without an error.
+					runErr = fmt.Errorf("backup aborted: %w", ctx.Err())
 				}
 			} else {
-				if err := runBackupHeadless(ctx, ch); err != nil {
-					run.Result = "error"
-					run.Error = err.Error()
-					_ = status.Save(config.StatusFilePath(), run)
-					return err
-				}
-				run.Result = "success"
+				runErr = runBackupHeadless(ctx, ch)
 			}
+			recordOutcome(run, runErr)
 			_ = status.Save(config.StatusFilePath(), run)
-			return nil
+			return runErr
 		},
 	}
 	c.Flags().Bool("skip-db", false, "Skip database dump and upload")
 	c.Flags().Bool("skip-media", false, "Skip media sync")
 	c.Flags().Bool("remote", false, "Interactively select backup remote and save path for future pre-fill")
 	return c
+}
+
+// recordOutcome sets run's Result and Error from the backup's final error.
+// A media sync where rclone skipped files is "partial"; any other error is
+// "error". Only a nil error counts as success.
+func recordOutcome(run *status.LastRun, err error) {
+	var partial *backup.PartialError
+	switch {
+	case err == nil:
+		run.Result = status.ResultSuccess
+		run.Error = ""
+		return
+	case errors.As(err, &partial):
+		run.Result = status.ResultPartial
+	default:
+		run.Result = status.ResultError
+	}
+	run.Error = err.Error()
 }
 
 // openRcloneLog opens the rclone log file in append mode, creating it (and
