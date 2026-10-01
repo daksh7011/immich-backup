@@ -4,9 +4,11 @@ package daemon
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 
 	"github.com/daksh7011/immich-backup/internal/config"
 )
@@ -44,6 +46,29 @@ type Manager interface {
 	Logs() (string, error)
 }
 
+// runner executes an external command and returns its combined stdout and
+// stderr, so failures can be reported with the tool's own message. Injected
+// into the managers so tests never run real systemctl or loginctl.
+type runner interface {
+	Run(name string, args ...string) ([]byte, error)
+}
+
+type execRunner struct{}
+
+func (execRunner) Run(name string, args ...string) ([]byte, error) {
+	return exec.Command(name, args...).CombinedOutput()
+}
+
+// cmdError wraps a failed command's error with its command line and trimmed
+// output, e.g. "systemctl --user enable x.timer: exit status 1: <stderr>".
+func cmdError(name string, args []string, out []byte, err error) error {
+	cmd := strings.Join(append([]string{name}, args...), " ")
+	if msg := strings.TrimSpace(string(out)); msg != "" {
+		return fmt.Errorf("%s: %w: %s", cmd, err, msg)
+	}
+	return fmt.Errorf("%s: %w", cmd, err)
+}
+
 // isSimpleInt reports whether s is a non-negative decimal integer with no
 // step (/), range (-), or list (,) syntax. Used to validate cron hour/minute
 // fields before inserting them into launchd plist integers or systemd OnCalendar.
@@ -59,7 +84,7 @@ func New() Manager {
 	case "darwin":
 		return &launchdManager{}
 	case "linux":
-		return &systemdManager{}
+		return newSystemdManager()
 	default:
 		panic(fmt.Sprintf("unsupported platform: %s", runtime.GOOS))
 	}

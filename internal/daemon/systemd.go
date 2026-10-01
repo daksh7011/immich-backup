@@ -4,7 +4,7 @@ package daemon
 import (
 	"fmt"
 	"os"
-	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -16,9 +16,10 @@ import (
 const unitName = "immich-backup.service"
 const timerName = "immich-backup.timer"
 
+// The service has no After=network.target: that target does not exist in a
+// user manager, so the ordering was a no-op.
 var unitTmpl = template.Must(template.New("unit").Parse(`[Unit]
 Description=immich-backup media and database backup service
-After=network.target
 
 [Service]
 Type=oneshot
@@ -30,9 +31,12 @@ StandardOutput=append:{{.LogPath}}
 StandardError=append:{{.LogPath}}
 `))
 
+// The timer activates immich-backup.service by its matching name. It must not
+// Require= the service: that starts a backup every time the timer starts
+// (install, start, each login or boot) and stopping the service stops the
+// timer.
 var timerTmpl = template.Must(template.New("timer").Parse(`[Unit]
 Description=immich-backup scheduled backup
-Requires=immich-backup.service
 
 [Timer]
 OnCalendar={{.OnCalendar}}
@@ -110,9 +114,76 @@ func timerPath() string {
 	return filepath.Join(home, ".config", "systemd", "user", timerName)
 }
 
-type systemdManager struct{}
+type systemdManager struct {
+	run      runner
+	geteuid  func() int
+	getenv   func(string) string
+	username func() (string, error)
+}
+
+func newSystemdManager() *systemdManager {
+	return &systemdManager{
+		run:      execRunner{},
+		geteuid:  os.Geteuid,
+		getenv:   os.Getenv,
+		username: currentUsername,
+	}
+}
+
+// currentUsername returns the current user's login name. Without CGo, os/user
+// only reads /etc/passwd, so fall back to $USER and $LOGNAME for directory
+// accounts (LDAP, SSSD).
+func currentUsername() (string, error) {
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		return u.Username, nil
+	}
+	for _, k := range []string{"USER", "LOGNAME"} {
+		if v := os.Getenv(k); v != "" {
+			return v, nil
+		}
+	}
+	return "", fmt.Errorf("cannot determine the current user name")
+}
+
+// command runs name with args and, on failure, returns an error carrying the
+// command line and its output, which names the real problem (no user bus,
+// unit not found, access denied).
+func (m *systemdManager) command(name string, args ...string) ([]byte, error) {
+	out, err := m.run.Run(name, args...)
+	if err != nil {
+		return out, cmdError(name, args, out, err)
+	}
+	return out, nil
+}
+
+func (m *systemdManager) systemctl(args ...string) error {
+	_, err := m.command("systemctl", append([]string{"--user"}, args...)...)
+	return err
+}
+
+// preflight checks that systemctl --user will reach this user's own manager.
+// As root it would install into root's manager instead, and without
+// XDG_RUNTIME_DIR (sudo or su without a login session) systemctl cannot find
+// the user bus.
+func (m *systemdManager) preflight() error {
+	uid := m.geteuid()
+	if uid == 0 {
+		return fmt.Errorf("refusing to manage the systemd user service as root: " +
+			"run immich-backup without sudo, as the user that should own the backups, " +
+			"from that user's own login session (e.g. ssh <user>@<host>)")
+	}
+	if m.getenv("XDG_RUNTIME_DIR") == "" {
+		return fmt.Errorf("XDG_RUNTIME_DIR is not set, so systemctl --user cannot reach your user manager: "+
+			"log in as this user directly (e.g. over SSH) instead of via sudo or su, "+
+			"or run `export XDG_RUNTIME_DIR=/run/user/%d` and retry", uid)
+	}
+	return nil
+}
 
 func (m *systemdManager) Install(cfg *config.Config) error {
+	if err := m.preflight(); err != nil {
+		return err
+	}
 	bin, err := StableExecutable()
 	if err != nil {
 		return err
@@ -143,39 +214,115 @@ func (m *systemdManager) Install(cfg *config.Config) error {
 	if err := os.WriteFile(tPath, []byte(timerContent), 0644); err != nil {
 		return fmt.Errorf("write timer file: %w", err)
 	}
-	_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
-	if err := exec.Command("systemctl", "--user", "enable", timerName).Run(); err != nil {
-		return fmt.Errorf("enable timer: %w", err)
+	return m.activate()
+}
+
+// activate loads the written units, enables the timer and restarts it so an
+// already-active timer picks up a changed OnCalendar, then makes sure the
+// user manager keeps running after logout.
+func (m *systemdManager) activate() error {
+	if err := m.systemctl("daemon-reload"); err != nil {
+		return err
 	}
-	return exec.Command("systemctl", "--user", "start", timerName).Run()
+	if err := m.systemctl("enable", timerName); err != nil {
+		return err
+	}
+	if err := m.systemctl("restart", timerName); err != nil {
+		return err
+	}
+	return m.ensureLinger()
+}
+
+// ensureLinger makes the user manager, and so the timer, run without a login
+// session. Without linger, logind stops user@UID.service when the last
+// session ends and does not start it at boot, so on a headless server the
+// timer never fires once you log out. polkit often refuses enable-linger
+// without root over SSH, so a failure ends in the exact sudo command to run.
+func (m *systemdManager) ensureLinger() error {
+	name, err := m.username()
+	if err != nil {
+		// loginctl accepts a numeric UID wherever it takes a user name.
+		name = strconv.Itoa(m.geteuid())
+	}
+	// show-user also fails with "not logged in or lingering" when linger is
+	// off, so a failed first check still goes on to enable it.
+	if on, _ := m.lingerEnabled(name); on {
+		return nil
+	}
+	_, enableErr := m.command("loginctl", "enable-linger", name)
+	on, checkErr := m.lingerEnabled(name)
+	if on {
+		return nil
+	}
+	cause := enableErr
+	if cause == nil {
+		cause = checkErr
+	}
+	if cause == nil {
+		cause = fmt.Errorf("Linger is still \"no\" after `loginctl enable-linger %s`", name)
+	}
+	return fmt.Errorf(
+		"lingering is off for user %q, so systemd stops the backup timer when you log out "+
+			"and scheduled backups never run on a headless server (%v). "+
+			"The timer is installed; to keep it running, run:\n  sudo loginctl enable-linger %s",
+		name, cause, name)
+}
+
+func (m *systemdManager) lingerEnabled(name string) (bool, error) {
+	out, err := m.command("loginctl", "show-user", name, "-p", "Linger", "--value")
+	if err != nil {
+		return false, err
+	}
+	return parseLinger(out), nil
+}
+
+// parseLinger reports whether loginctl's Linger property is "yes". It accepts
+// both the --value form ("yes") and the key=value form ("Linger=yes").
+func parseLinger(out []byte) bool {
+	v := strings.TrimSpace(string(out))
+	return strings.TrimPrefix(v, "Linger=") == "yes"
 }
 
 func (m *systemdManager) Uninstall() error {
-	_ = exec.Command("systemctl", "--user", "stop", timerName).Run()
-	_ = exec.Command("systemctl", "--user", "disable", timerName).Run()
+	if err := m.preflight(); err != nil {
+		return err
+	}
+	// stop and disable fail when the timer was never installed; that is fine
+	// here, the goal is only that it is gone.
+	_ = m.systemctl("stop", timerName)
+	_ = m.systemctl("disable", timerName)
 	_ = os.Remove(timerPath())
 	_ = os.Remove(unitPath())
-	return exec.Command("systemctl", "--user", "daemon-reload").Run()
+	return m.systemctl("daemon-reload")
 }
 
 func (m *systemdManager) Start() error {
-	return exec.Command("systemctl", "--user", "start", timerName).Run()
+	if err := m.preflight(); err != nil {
+		return err
+	}
+	return m.systemctl("start", timerName)
 }
 
 func (m *systemdManager) Stop() error {
-	return exec.Command("systemctl", "--user", "stop", timerName).Run()
+	if err := m.preflight(); err != nil {
+		return err
+	}
+	return m.systemctl("stop", timerName)
 }
 
 func (m *systemdManager) Restart() error {
-	return exec.Command("systemctl", "--user", "restart", timerName).Run()
+	if err := m.preflight(); err != nil {
+		return err
+	}
+	return m.systemctl("restart", timerName)
 }
 
 func (m *systemdManager) Status() (string, error) {
-	out, err := exec.Command("systemctl", "--user", "status", timerName).Output()
+	out, err := m.run.Run("systemctl", "--user", "status", timerName)
 	return string(out), err
 }
 
 func (m *systemdManager) Logs() (string, error) {
-	out, err := exec.Command("journalctl", "--user", "-u", unitName, "-n", "100").Output()
+	out, err := m.run.Run("journalctl", "--user", "-u", unitName, "-n", "100")
 	return string(out), err
 }
