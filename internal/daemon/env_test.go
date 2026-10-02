@@ -3,6 +3,7 @@ package daemon_test
 
 import (
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -155,5 +156,82 @@ func TestGeneratePlist_EscapesEnvironmentValues(t *testing.T) {
 	}
 	if !strings.Contains(plist, "<string>/opt/a&amp;b/&lt;bin&gt;:/usr/bin</string>") {
 		t.Errorf("PATH must be XML-escaped:\n%s", plist)
+	}
+}
+
+// A TLS TCP endpoint needs the TLS variables too, or the scheduled run talks
+// plain HTTP to the TLS port.
+func TestResolveServiceEnv_CapturesDockerTLSSettings(t *testing.T) {
+	resolve := func() (string, error) { return "/usr/bin/rclone", nil }
+	vals := map[string]string{
+		"DOCKER_HOST":        "tcp://127.0.0.1:2376",
+		"DOCKER_TLS_VERIFY":  "1",
+		"DOCKER_CERT_PATH":   "/home/me/.docker",
+		"DOCKER_API_VERSION": "1.45",
+	}
+	env, err := daemon.ResolveServiceEnvWith(resolve, func(k string) string { return vals[k] })
+	if err != nil {
+		t.Fatalf("ResolveServiceEnv: %v", err)
+	}
+	if env.DockerTLSVerify != "1" || env.DockerCertPath != "/home/me/.docker" || env.DockerAPIVersion != "1.45" {
+		t.Errorf("TLS settings not captured: %+v", env)
+	}
+}
+
+func TestResolveServiceEnv_MakesCertPathAbsolute(t *testing.T) {
+	resolve := func() (string, error) { return "/usr/bin/rclone", nil }
+	getenv := func(k string) string {
+		if k == "DOCKER_CERT_PATH" {
+			return "certs"
+		}
+		return ""
+	}
+	env, err := daemon.ResolveServiceEnvWith(resolve, getenv)
+	if err != nil {
+		t.Fatalf("ResolveServiceEnv: %v", err)
+	}
+	if !filepath.IsAbs(filepath.FromSlash(env.DockerCertPath)) || !strings.HasSuffix(env.DockerCertPath, "/certs") {
+		t.Errorf("DockerCertPath = %q, want an absolute path ending in /certs", env.DockerCertPath)
+	}
+}
+
+var tlsEnv = daemon.ServiceEnv{
+	Path:             "/usr/bin",
+	DockerHost:       "tcp://127.0.0.1:2376",
+	DockerTLSVerify:  "1",
+	DockerCertPath:   `/home/me/100% "certs"`,
+	DockerAPIVersion: "1.45",
+}
+
+func TestGenerateSystemdUnit_ContainsDockerTLSSettings(t *testing.T) {
+	unit := daemon.GenerateSystemdUnit("/usr/local/bin/immich-backup", testCfg, tlsEnv)
+	for _, want := range []string{
+		`Environment="DOCKER_TLS_VERIFY=1"`,
+		`Environment="DOCKER_CERT_PATH=/home/me/100%% \"certs\""`,
+		`Environment="DOCKER_API_VERSION=1.45"`,
+	} {
+		if !strings.Contains(unit, want) {
+			t.Errorf("unit missing %s:\n%s", want, unit)
+		}
+	}
+	plain := daemon.GenerateSystemdUnit("/usr/local/bin/immich-backup", testCfg, testEnv)
+	if strings.Contains(plain, "DOCKER_TLS_VERIFY") {
+		t.Errorf("unit must not set DOCKER_TLS_VERIFY when it is empty:\n%s", plain)
+	}
+}
+
+func TestGeneratePlist_ContainsDockerTLSSettings(t *testing.T) {
+	plist, err := daemon.GeneratePlist("/usr/local/bin/immich-backup", testCfg, tlsEnv)
+	if err != nil {
+		t.Fatalf("GeneratePlist: %v", err)
+	}
+	for _, want := range []string{
+		"<key>DOCKER_TLS_VERIFY</key>", "<string>1</string>",
+		"<key>DOCKER_CERT_PATH</key>", "<string>/home/me/100% &#34;certs&#34;</string>",
+		"<key>DOCKER_API_VERSION</key>", "<string>1.45</string>",
+	} {
+		if !strings.Contains(plist, want) {
+			t.Errorf("plist missing %s:\n%s", want, plist)
+		}
 	}
 }

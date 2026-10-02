@@ -122,7 +122,7 @@ func (w *capWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// IsContainerRunning returns true if containerName exists and is in Running state.
+// IsContainerRunning returns true if containerName exists and is running.
 // Returns false (no error) if the container does not exist.
 func (c *Client) IsContainerRunning(containerName string) (bool, error) {
 	ctx := context.Background()
@@ -133,5 +133,12 @@ func (c *Client) IsContainerRunning(containerName string) (bool, error) {
 		}
 		return false, fmt.Errorf("inspect %s: %w", containerName, err)
 	}
-	return info.State.Running, nil
+	return isRunning(info.State), nil
+}
+
+// isRunning reports whether a container can run commands. Docker keeps
+// Running true while a container waits to be restarted or is paused, and
+// neither can exec, so both count as not running.
+func isRunning(s *container.State) bool {
+	return s != nil && s.Running && !s.Restarting && !s.Paused
 }

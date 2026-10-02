@@ -55,9 +55,9 @@ type backupDeps struct {
 	check          func(docker.Executor, *config.Config, string) []doctor.CheckResult
 	statusPath     string
 	rcloneConfPath string
-	// prereqWait bounds how long a headless run waits for Docker and the
-	// Postgres container to come up; zero fails at once. prereqPoll is the
-	// interval between checks.
+	// prereqWait bounds how long a headless run waits for Docker and
+	// Postgres to come up; zero fails at once. prereqPoll is the interval
+	// between checks.
 	prereqWait time.Duration
 	prereqPoll time.Duration
 }
@@ -154,9 +154,15 @@ func runBackupAttempt(cfg *config.Config, deps backupDeps, skipDB, skipMedia, pi
 	}
 	defer client.Close()
 
+	interactive := isTTY()
 	results := deps.check(client, cfg, deps.rcloneConfPath)
-	if doctor.AnyFailed(results) && !isTTY() {
+	if doctor.AnyFailed(results) && !interactive {
 		results = waitForPrerequisites(ctx, deps, client, cfg, results)
+	}
+	// The checks do not watch ctx, so a signal that arrived meanwhile only
+	// shows up here.
+	if err := cancelledBeforeRun(ctx, interactive, results); err != nil {
+		return err
 	}
 	if doctor.AnyFailed(results) {
 		for _, r := range results {
@@ -186,8 +192,13 @@ func runBackupAttempt(cfg *config.Config, deps backupDeps, skipDB, skipMedia, pi
 		defaultName, _ := splitRemote(cfg.Backup.RcloneRemote)
 		storedPath := cfg.Backup.RemotePaths[defaultName]
 		picker := tui.NewRemotePickerModel(remotes, defaultName+":"+storedPath)
-		p := tea.NewProgram(picker)
+		p := tea.NewProgram(picker, tea.WithoutSignalHandler())
+		stop := context.AfterFunc(ctx, p.Quit)
 		result, err := p.Run()
+		stop()
+		if ctx.Err() != nil {
+			return errBackupCancelled
+		}
 		if err != nil {
 			return fmt.Errorf("remote picker: %w", err)
 		}
@@ -260,8 +271,11 @@ func finishRun(ctx context.Context, cancel context.CancelFunc, w *runWatcher, di
 
 // runBackupTUI shows the live progress TUI until the user dismisses it. A
 // signal (e.g. SIGHUP when the terminal closes) quits the TUI too.
+// signalContext is the only signal handler: Bubble Tea's own would race the
+// AfterFunc to send a quit message and, on losing, block forever on a send
+// nothing reads, hanging p.Run.
 func runBackupTUI(ctx context.Context, cancel context.CancelFunc, ch <-chan any, skipDB, skipMedia bool) error {
-	p := tea.NewProgram(tui.NewBackupModel(ch, cancel, skipDB, skipMedia))
+	p := tea.NewProgram(tui.NewBackupModel(ch, cancel, skipDB, skipMedia), tea.WithoutSignalHandler())
 	stop := context.AfterFunc(ctx, p.Quit)
 	defer stop()
 	if _, err := p.Run(); err != nil {
@@ -289,6 +303,25 @@ func signalContext() (context.Context, context.CancelFunc) {
 		signal.Stop(sigs)
 		cancel(context.Canceled)
 	}
+}
+
+// cancelledBeforeRun returns the error for a signal that arrived during the
+// prerequisite checks, or nil if ctx is still live. At a terminal it is the
+// user's Ctrl+C before anything ran, so it is not recorded. A headless run
+// whose checks failed gets nil, so those failures are recorded as when the
+// boot wait runs out; one whose checks passed is recorded as aborted, as a
+// run stopped mid-way would be.
+func cancelledBeforeRun(ctx context.Context, interactive bool, results []doctor.CheckResult) error {
+	if ctx.Err() == nil {
+		return nil
+	}
+	if interactive {
+		return errBackupCancelled
+	}
+	if doctor.AnyFailed(results) {
+		return nil
+	}
+	return fmt.Errorf("backup aborted: %w", context.Cause(ctx))
 }
 
 // runWatcher relays backup.Run's messages to the display and records the
@@ -354,13 +387,14 @@ func (w *runWatcher) stop(timeout time.Duration) {
 
 // waitForPrerequisites re-runs the checks while the only failures are ones
 // that clear up on their own after boot (Docker not up yet, Postgres
-// container not started yet), for at most deps.prereqWait. Any other failure,
-// a permission error, or a cancelled ctx returns the results at once.
+// container not started or Postgres not yet accepting connections), for at
+// most deps.prereqWait. Any other failure, a permission error, or a
+// cancelled ctx returns the results at once.
 func waitForPrerequisites(ctx context.Context, deps backupDeps, ex docker.Executor, cfg *config.Config, results []doctor.CheckResult) []doctor.CheckResult {
 	if deps.prereqWait <= 0 || !onlyTransientFailures(results) {
 		return results
 	}
-	slog.Warn("waiting for Docker and the Postgres container", "max_wait", deps.prereqWait,
+	slog.Warn("waiting for Docker and Postgres", "max_wait", deps.prereqWait,
 		"reason", prerequisiteError(results).Error())
 	deadline := time.Now().Add(deps.prereqWait)
 	for time.Now().Before(deadline) {
@@ -382,7 +416,8 @@ func waitForPrerequisites(ctx context.Context, deps backupDeps, ex docker.Execut
 }
 
 // transientChecks are the checks that fail while the machine is still
-// booting and pass on their own once Docker has started the containers.
+// booting and pass on their own once Docker has started the containers and
+// Postgres accepts connections.
 var transientChecks = map[string]bool{"Docker Socket": true, "Postgres Container": true}
 
 // onlyTransientFailures reports whether every failed check is a transient

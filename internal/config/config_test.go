@@ -346,3 +346,37 @@ func TestValidate_RejectsRelativeLogPath(t *testing.T) {
 		}
 	}
 }
+
+func TestValidate_RejectsRelativeUploadLocation(t *testing.T) {
+	for _, p := range []string{"./library", "library", "~other/library"} {
+		cfg := config.Config{
+			Immich: config.ImmichConfig{
+				UploadLocation: p, PostgresContainer: "c",
+				PostgresUser: "u", PostgresDB: "d",
+			},
+			Backup: config.BackupConfig{
+				RcloneRemote: "b2:test", Schedule: "0 3 * * *",
+				DBBackupFrequency: "0 */6 * * *",
+				Retention:         config.RetentionConfig{Daily: 7, Weekly: 4},
+				Transfers:         1, Checkers: 1, BufferSize: "64M",
+			},
+			Daemon: config.DaemonConfig{LogPath: "/tmp/daemon.log"},
+		}
+		err := cfg.Validate()
+		if err == nil {
+			t.Errorf("%q: expected validation error for relative upload_location", p)
+			continue
+		}
+		if !strings.Contains(err.Error(), "immich.upload_location: must be an absolute path") {
+			t.Errorf("%q: expected absolute-path error, got: %v", p, err)
+		}
+	}
+}
+
+func TestValidateUploadLocation_AcceptsAbsoluteAndHome(t *testing.T) {
+	for _, p := range []string{"/mnt/immich/library", "~/immich/library", "~"} {
+		if err := config.ValidateUploadLocation(p); err != nil {
+			t.Errorf("%q: unexpected error: %v", p, err)
+		}
+	}
+}

@@ -101,7 +101,7 @@ func NewSetupModel(cfg *config.Config, rcloneConfigPath string) SetupModel {
 			huh.NewInput().
 				Title("Immich upload location").
 				Value(&cfg.Immich.UploadLocation).
-				Validate(required("Upload location")),
+				Validate(validateUploadLocation),
 			huh.NewInput().
 				Title("Postgres container name").
 				Value(&cfg.Immich.PostgresContainer).
@@ -171,6 +171,15 @@ func validatePositiveInt(s string) error {
 		return fmt.Errorf("must be a positive integer")
 	}
 	return nil
+}
+
+// validateUploadLocation applies config's rule, so the wizard cannot save a
+// relative path that only works from the directory it was run in.
+func validateUploadLocation(s string) error {
+	if err := required("Upload location")(s); err != nil {
+		return err
+	}
+	return config.ValidateUploadLocation(s)
 }
 
 // validateScheduleInput applies the rule `daemon install` enforces, so the

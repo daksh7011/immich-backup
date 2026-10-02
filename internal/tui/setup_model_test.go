@@ -57,3 +57,16 @@ func TestValidatePositiveInt(t *testing.T) {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
+
+func TestValidateUploadLocation(t *testing.T) {
+	for _, s := range []string{"", "  ", "./library", "library"} {
+		if err := validateUploadLocation(s); err == nil {
+			t.Errorf("%q: expected error", s)
+		}
+	}
+	for _, s := range []string{"/mnt/immich/library", "~/immich/library"} {
+		if err := validateUploadLocation(s); err != nil {
+			t.Errorf("%q: unexpected error: %v", s, err)
+		}
+	}
+}

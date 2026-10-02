@@ -144,6 +144,11 @@ func Save(path string, cfg *Config) error {
 func (c *Config) Validate() error {
 	var errs []string
 	if c.Immich.UploadLocation == ""    { errs = append(errs, "immich.upload_location is required") }
+	if c.Immich.UploadLocation != "" {
+		if err := ValidateUploadLocation(c.Immich.UploadLocation); err != nil {
+			errs = append(errs, "immich.upload_location: "+err.Error())
+		}
+	}
 	if c.Immich.PostgresContainer == "" { errs = append(errs, "immich.postgres_container is required") }
 	if c.Immich.PostgresUser == ""      { errs = append(errs, "immich.postgres_user is required") }
 	if c.Immich.PostgresDB == ""        { errs = append(errs, "immich.postgres_db is required") }
@@ -163,6 +168,17 @@ func (c *Config) Validate() error {
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("config validation failed:\n  - %s", strings.Join(errs, "\n  - "))
+	}
+	return nil
+}
+
+// ValidateUploadLocation rejects an upload location that is not absolute
+// once a leading "~" is expanded. A relative path (Immich's .env default is
+// "./library") resolves against the working directory, which for a
+// scheduled run is not the directory manual runs were started from.
+func ValidateUploadLocation(p string) error {
+	if !isAbsPath(expandHome(p)) {
+		return fmt.Errorf("must be an absolute path (got %q); use the full host path Immich's UPLOAD_LOCATION points to", p)
 	}
 	return nil
 }

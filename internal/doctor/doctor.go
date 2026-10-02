@@ -36,14 +36,14 @@ type CheckResult struct {
 //  1. rclone binary in PATH or a well-known install dir
 //  2. rcloneConfPath exists and has ≥1 remote
 //  3. Docker socket accessible
-//  4. Immich Postgres container running
+//  4. Immich Postgres container running and accepting connections
 //  5. Config valid
 func Check(ex docker.Executor, cfg *config.Config, rcloneConfPath string) []CheckResult {
 	return []CheckResult{
 		checkRcloneBinary(),
 		checkRcloneConf(rcloneConfPath),
 		checkDockerSocket(ex),
-		checkPostgresContainer(ex, cfg.Immich.PostgresContainer),
+		checkPostgresContainer(ex, cfg.Immich.PostgresContainer, cfg.Immich.PostgresUser),
 		checkConfig(cfg),
 	}
 }
@@ -134,7 +134,11 @@ func dockerSocketRemedy(err error) string {
 	return remedy
 }
 
-func checkPostgresContainer(ex docker.Executor, name string) CheckResult {
+// checkPostgresContainer checks that the container is running and that
+// Postgres in it accepts connections. Right after the container starts
+// (at boot, or after a crash) Postgres may still be starting up or
+// recovering, and pg_dumpall would fail.
+func checkPostgresContainer(ex docker.Executor, name, user string) CheckResult {
 	if ex == nil {
 		return CheckResult{
 			Name:    "Postgres Container",
@@ -160,8 +164,28 @@ func checkPostgresContainer(ex docker.Executor, name string) CheckResult {
 			Remedy:  "Start the Immich stack: `docker compose up -d`",
 		}
 	}
+	if err := postgresReady(ex, name, user); err != nil {
+		return CheckResult{
+			Name:    "Postgres Container",
+			OK:      false,
+			Message: fmt.Sprintf("container %q is running but Postgres is not accepting connections: %v", name, err),
+			Remedy:  fmt.Sprintf("Wait for Postgres to finish starting, or check `docker logs %s`", name),
+		}
+	}
 	return CheckResult{Name: "Postgres Container", OK: true,
-		Message: fmt.Sprintf("container %q is running", name)}
+		Message: fmt.Sprintf("container %q is running and accepting connections", name)}
+}
+
+// postgresReady runs pg_isready in the container, which ships with
+// pg_dumpall in every Postgres image; it exits non-zero until the server
+// accepts connections.
+func postgresReady(ex docker.Executor, name, user string) error {
+	var args []string
+	if user != "" {
+		args = append(args, "-U", user)
+	}
+	_, err := ex.Exec(name, "pg_isready", args...)
+	return err
 }
 
 func checkConfig(cfg *config.Config) CheckResult {
@@ -276,7 +300,9 @@ func CheckAsync(ctx context.Context, ex docker.Executor, cfg *config.Config, cfg
 		{"rclone Binary", checkRcloneBinary},
 		{"rclone Config", func() CheckResult { return checkRcloneConf(rcloneConfPath) }},
 		{"Docker Socket", func() CheckResult { return checkDockerSocket(ex) }},
-		{"Postgres Container", func() CheckResult { return checkPostgresContainer(ex, cfg.Immich.PostgresContainer) }},
+		{"Postgres Container", func() CheckResult {
+			return checkPostgresContainer(ex, cfg.Immich.PostgresContainer, cfg.Immich.PostgresUser)
+		}},
 		{"Config", func() CheckResult { return checkConfigLoad(cfg, cfgErr) }},
 	}
 	checks = append(checks, serviceChecks(svc, runtime.GOOS)...)

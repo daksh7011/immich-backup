@@ -88,6 +88,9 @@ var (
 	allOK    = []doctor.CheckResult{{Name: "Docker Socket", OK: true}, {Name: "Postgres Container", OK: true}}
 	denied   = []doctor.CheckResult{{Name: "Docker Socket", Message: "Docker socket unreachable at unix:///var/run/docker.sock: permission denied"}}
 	noRclone = []doctor.CheckResult{{Name: "rclone Binary", Message: "rclone not found"}, {Name: "Postgres Container", Message: "not running"}}
+	// The container is up but Postgres is still starting or recovering.
+	pgStarting = []doctor.CheckResult{{Name: "Docker Socket", OK: true}, {Name: "Postgres Container",
+		Message: `container "immich_postgres" is running but Postgres is not accepting connections: exec exited with code 1`}}
 )
 
 func TestWaitForPrerequisites_WaitsForPostgresAtBoot(t *testing.T) {
@@ -100,6 +103,44 @@ func TestWaitForPrerequisites_WaitsForPostgresAtBoot(t *testing.T) {
 	}
 	if *calls != 3 {
 		t.Errorf("check calls: got %d, want 3", *calls)
+	}
+}
+
+// A running container is not enough: pg_dumpall fails until Postgres accepts
+// connections, so the wait goes on until then.
+func TestWaitForPrerequisites_WaitsForPostgresToAcceptConnections(t *testing.T) {
+	check, calls := checkSequence(t, pgStarting, pgStarting, allOK)
+	deps := backupDeps{check: check, prereqWait: time.Minute, prereqPoll: time.Millisecond}
+
+	got := waitForPrerequisites(context.Background(), deps, nil, &config.Config{}, pgStarting)
+	if doctor.AnyFailed(got) {
+		t.Errorf("expected the checks to pass once Postgres accepts connections, got %v", got)
+	}
+	if *calls != 3 {
+		t.Errorf("check calls: got %d, want 3", *calls)
+	}
+}
+
+func TestCancelledBeforeRun(t *testing.T) {
+	signalled, cancel := context.WithCancelCause(context.Background())
+	cancel(errors.New("signal: interrupt"))
+
+	if err := cancelledBeforeRun(context.Background(), true, allOK); err != nil {
+		t.Errorf("live ctx: got %v, want nil", err)
+	}
+	// Ctrl+C at a terminal before anything ran is not a backup attempt.
+	for name, results := range map[string][]doctor.CheckResult{"passed": allOK, "failed": pgDown} {
+		if err := cancelledBeforeRun(signalled, true, results); !errors.Is(err, errBackupCancelled) {
+			t.Errorf("interactive, checks %s: got %v, want errBackupCancelled", name, err)
+		}
+	}
+	// A headless wait cut short records the checks that were still failing.
+	if err := cancelledBeforeRun(signalled, false, pgDown); err != nil {
+		t.Errorf("headless, checks failed: got %v, want nil so the failures are recorded", err)
+	}
+	// Headless with the checks passed: aborted, without starting the run.
+	if err := cancelledBeforeRun(signalled, false, allOK); err == nil || err.Error() != "backup aborted: signal: interrupt" {
+		t.Errorf("headless, checks passed: got %v, want backup aborted: signal: interrupt", err)
 	}
 }
 

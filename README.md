@@ -104,7 +104,7 @@ daemon:
 
 `backup.db_backup_frequency` and `backup.retention` are **not yet implemented**: the database is dumped once per backup run and old dumps are not pruned. Existing configs that set them still load, but the values are ignored.
 
-`daemon.log_path` defaults to `~/.immich-backup/logs/daemon.log` when omitted. A leading `~/` (in `log_path` and `upload_location`) is expanded to your home directory when the config is loaded; any other relative `log_path` is rejected. `daemon install` creates the log directory and file, since systemd and launchd will not start the job if it is missing. The installed service keeps the log path it was installed with, so re-run `daemon install` after changing it.
+`daemon.log_path` defaults to `~/.immich-backup/logs/daemon.log` when omitted. A leading `~/` (in `log_path` and `upload_location`) is expanded to your home directory when the config is loaded; any other relative `log_path` or `upload_location` is rejected (use the full host path, not Immich's `./library` default). `daemon install` creates the log directory and file, since systemd and launchd will not start the job if it is missing. The installed service keeps the log path it was installed with, so re-run `daemon install` after changing it.
 
 ### rclone configuration
 
@@ -118,7 +118,7 @@ Scheduled runs do not get your shell's environment, so `daemon install` writes w
 
 - the absolute path of the `immich-backup` binary. A Homebrew install uses the stable `bin` or `opt` link rather than the versioned Cellar path, so `brew upgrade` does not break the service.
 - a `PATH` with rclone's directory first, then `/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`. If rclone cannot be found, install fails.
-- `DOCKER_HOST`, if it is set in the shell you run `daemon install` from. With rootless Docker, Colima or Podman, export it first.
+- `DOCKER_HOST`, `DOCKER_TLS_VERIFY`, `DOCKER_CERT_PATH` (made absolute) and `DOCKER_API_VERSION`, if they are set in the shell you run `daemon install` from. With rootless Docker, Colima, Podman or a TLS endpoint, export them first.
 
 Check the result with `immich-backup daemon status` (timer or job state, next run, last scheduled run and its result) and `immich-backup doctor`. `daemon logs` shows the scheduler's own messages, including failures that happen before the backup writes anything to its log.
 
@@ -126,7 +126,7 @@ Check the result with `immich-backup daemon status` (timer or job state, next ru
 
 `daemon install` writes `immich-backup.service` and `immich-backup.timer` to `~/.config/systemd/user/`, reloads systemd, enables and (re)starts the timer. The timer is `Persistent=true`: whenever the timer starts and a scheduled time has passed since the last run, systemd runs the missed backup at once. That happens at boot after the machine was off at the scheduled time, and also on `daemon start`, `restart` or `install` when the timer was stopped or uninstalled over a scheduled time, or when a changed schedule's time already passed today. A first install, with no earlier run, does not trigger one.
 
-A catch-up run at boot can start before Docker has restarted the Immich containers, since a user service cannot wait for the system's `docker.service`. A scheduled run therefore waits up to 10 minutes for the Docker socket and the Postgres container before it fails (a permission error on the socket fails at once).
+A catch-up run at boot can start before Docker has restarted the Immich containers, since a user service cannot wait for the system's `docker.service`. A scheduled run therefore waits up to 10 minutes for the Docker socket, the Postgres container and Postgres accepting connections (`pg_isready`) before it fails (a permission error on the socket fails at once).
 
 **Lingering.** A systemd user timer runs only while your user manager is running. Without lingering, systemd stops it when your last login session ends and does not start it at boot, so on a headless server scheduled backups never run once you log out. `daemon install` checks this and runs `loginctl enable-linger <user>` when it is off. Many systems allow that only for root; then install fails after installing the timer and tells you to run:
 
@@ -174,7 +174,7 @@ This rewrites the unit or plist for the new version and binary path. `doctor` wa
 
 ### Backup flow
 
-1. **Doctor checks** — verifies rclone binary, rclone config has a remote, Docker socket, Postgres container running, config valid. A failure is recorded in the status file and the backup stops.
+1. **Doctor checks** — verifies rclone binary, rclone config has a remote, Docker socket, Postgres container running and accepting connections, config valid. A failure is recorded in the status file and the backup stops.
 2. **Database backup** — runs `pg_dumpall -U <user>` inside the Postgres container via `docker exec`, streams it through gzip into a private (0600) temp file, and uploads it to `<remote>/db/`. The temp file is removed after the upload, or when the run fails or is interrupted.
 3. **Media sync** — checks that `upload_location` exists, is readable and is not empty (so an unmounted volume cannot wipe the remote), then runs `rclone sync <upload_location> <remote> --exclude /db/** --config ~/.immich-backup/rclone.conf`. The exclude keeps the sync from deleting the database dumps; it also means a top-level `db` folder inside `upload_location` is not synced.
 4. **Status write** — records the result to `~/.immich-backup/last-run.json`: `success`, `partial` (rclone could not copy some files), or `error`
