@@ -169,6 +169,21 @@ func bootoutInProgress(out []byte, err error) bool {
 	return exitCode(err) == 36 || strings.Contains(string(out), "Operation now in progress")
 }
 
+// domainUnsupported reports whether launchd refused the GUI domain for the
+// calling session: exit 125, "Domain does not support specified action".
+// bootstrap and bootout return it from an SSH (non-Aqua) session, even while
+// the user is logged in at the console and `launchctl print gui/<uid>` works.
+func domainUnsupported(out []byte, err error) bool {
+	return exitCode(err) == 125 || strings.Contains(string(out), "Domain does not support specified action")
+}
+
+// sshSessionError explains a domainUnsupported failure of cause.
+func (m *launchdManager) sshSessionError(cause error) error {
+	return fmt.Errorf("%w\nlaunchctl cannot load or unload a LaunchAgent in %s from an SSH session, "+
+		"even while you are logged in at the console: run this command from Terminal "+
+		"in the logged-in desktop session (at the console or via Screen Sharing)", cause, m.domain())
+}
+
 func (m *launchdManager) hasGUISession() bool {
 	_, err := m.run.Run("launchctl", "print", m.domain())
 	return err == nil
@@ -247,8 +262,12 @@ func (m *launchdManager) load() error {
 	if _, err := m.launchctl("enable", m.target()); err != nil {
 		return err
 	}
-	if _, err := m.launchctl("bootstrap", m.domain(), m.plistPath()); err != nil {
-		return err
+	args := []string{"bootstrap", m.domain(), m.plistPath()}
+	if out, err := m.run.Run("launchctl", args...); err != nil {
+		if domainUnsupported(out, err) {
+			return m.sshSessionError(cmdError("launchctl", args, out, err))
+		}
+		return cmdError("launchctl", args, out, err)
 	}
 	if out, err := m.run.Run("launchctl", "print", m.target()); err != nil {
 		return fmt.Errorf("%s is not loaded after launchctl bootstrap: %w",
@@ -271,6 +290,8 @@ func (m *launchdManager) bootout() error {
 		return nil
 	case bootoutInProgress(out, err):
 		return m.waitUnloaded()
+	case domainUnsupported(out, err):
+		return m.sshSessionError(cmdError("launchctl", args, out, err))
 	default:
 		return cmdError("launchctl", args, out, err)
 	}

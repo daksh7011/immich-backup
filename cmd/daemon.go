@@ -16,16 +16,16 @@ func newDaemonCmd() *cobra.Command {
 		Short: "Manage the immich-backup background service",
 	}
 
-	cmd.AddCommand(interruptsOnMac(newDaemonSubCmd("install", "Install and enable the background service", "Installing service…",
-		func(c *cobra.Command, m daemon.Manager) error { return m.Install(GetConfig(c)) })))
+	cmd.AddCommand(catchUpOnLinux(interruptsOnMac(newDaemonSubCmd("install", "Install and enable the background service", "Installing service…",
+		func(c *cobra.Command, m daemon.Manager) error { return m.Install(GetConfig(c)) }))))
 	cmd.AddCommand(interruptsOnMac(newDaemonSubCmd("uninstall", "Remove the background service", "Uninstalling service…",
 		func(c *cobra.Command, m daemon.Manager) error { return m.Uninstall() })))
-	cmd.AddCommand(newDaemonSubCmd("start", "Start the background service", "Starting service…",
-		func(c *cobra.Command, m daemon.Manager) error { return m.Start() }))
+	cmd.AddCommand(catchUpOnLinux(newDaemonSubCmd("start", "Start the background service", "Starting service…",
+		func(c *cobra.Command, m daemon.Manager) error { return m.Start() })))
 	cmd.AddCommand(interruptsOnMac(newDaemonSubCmd("stop", "Stop the background service", "Stopping service…",
 		func(c *cobra.Command, m daemon.Manager) error { return m.Stop() })))
-	cmd.AddCommand(interruptsOnMac(newDaemonSubCmd("restart", "Restart the background service", "Restarting service…",
-		func(c *cobra.Command, m daemon.Manager) error { return m.Restart() })))
+	cmd.AddCommand(catchUpOnLinux(interruptsOnMac(newDaemonSubCmd("restart", "Restart the background service", "Restarting service…",
+		func(c *cobra.Command, m daemon.Manager) error { return m.Restart() }))))
 
 	cmd.AddCommand(&cobra.Command{
 		Use:   "status",
@@ -78,6 +78,20 @@ func newDaemonCmd() *cobra.Command {
 func interruptsOnMac(c *cobra.Command) *cobra.Command {
 	c.Long = c.Short + ".\n\nOn macOS this unloads the launchd job, which interrupts a backup " +
 		"that is running at that moment; on Linux a running backup is left to finish."
+	return c
+}
+
+// catchUpOnLinux documents the systemd timer's Persistent=true catch-up:
+// starting the timer runs a backup at once when a scheduled time passed
+// since the last run, e.g. while the timer was stopped or not installed, or
+// because a new schedule's time already passed today.
+func catchUpOnLinux(c *cobra.Command) *cobra.Command {
+	if c.Long == "" {
+		c.Long = c.Short + "."
+	}
+	c.Long += "\n\nOn Linux, if a scheduled time has passed since the last backup (the timer was " +
+		"stopped or not installed, or a changed schedule's time already passed today), " +
+		"systemd runs that backup as soon as the timer starts."
 	return c
 }
 

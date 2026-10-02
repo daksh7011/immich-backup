@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,8 +21,11 @@ import (
 type fakeClient struct{ closed bool }
 
 func (f *fakeClient) Exec(string, string, ...string) ([]byte, error) { return nil, nil }
-func (f *fakeClient) IsContainerRunning(string) (bool, error)        { return true, nil }
-func (f *fakeClient) Close()                                         { f.closed = true }
+func (f *fakeClient) ExecStream(context.Context, io.Writer, string, string, ...string) error {
+	return nil
+}
+func (f *fakeClient) IsContainerRunning(string) (bool, error) { return true, nil }
+func (f *fakeClient) Close()                                  { f.closed = true }
 
 func testBackupDeps(t *testing.T, client *fakeClient, results []doctor.CheckResult) backupDeps {
 	t.Helper()

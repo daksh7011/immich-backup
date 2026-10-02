@@ -87,6 +87,6 @@ func newLogsCmd() *cobra.Command {
 			return err
 		},
 	}
-	c.Flags().Bool("rclone", false, "Show rclone debug log instead of daemon log")
+	c.Flags().Bool("rclone", false, "Show the rclone log instead of the daemon log")
 	return c
 }

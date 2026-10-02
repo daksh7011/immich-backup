@@ -379,3 +379,36 @@ func TestLaunchdUninstall_NoGUISessionSkipsBootout(t *testing.T) {
 		t.Errorf("plist should be removed, stat err: %v", err)
 	}
 }
+
+// Over SSH, gui/<uid> exists while someone is logged in at the console, but
+// launchd refuses bootstrap and bootout from the SSH session with exit 125.
+func TestLaunchdActivate_BootstrapFromSSHExplainsGUISession(t *testing.T) {
+	for _, denied := range []reply{
+		{out: "Bootstrap failed: 125: Domain does not support specified action", err: errors.New("exit status 125")},
+		{err: exitErr(125)},
+	} {
+		r := &fakeRunner{replies: map[string][]reply{agentBootout: {notLoaded}}}
+		m, plist := newTestLaunchd(t, r, 501)
+		r.replies["launchctl bootstrap gui/501 "+plist] = []reply{denied}
+		err := m.Activate()
+		if err == nil {
+			t.Fatal("expected error when bootstrap is refused")
+		}
+		for _, want := range []string{"SSH session", "Terminal in the logged-in desktop session", "bootstrap gui/501"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error should contain %q, got: %v", want, err)
+			}
+		}
+	}
+}
+
+func TestLaunchdStop_BootoutFromSSHExplainsGUISession(t *testing.T) {
+	r := &fakeRunner{replies: map[string][]reply{
+		agentBootout: {{out: "Boot-out failed: 125: Domain does not support specified action", err: errors.New("exit status 125")}},
+	}}
+	m, _ := newTestLaunchd(t, r, 501)
+	err := m.Stop()
+	if err == nil || !strings.Contains(err.Error(), "SSH session") {
+		t.Fatalf("expected the SSH remedy, got: %v", err)
+	}
+}

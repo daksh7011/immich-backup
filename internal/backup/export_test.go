@@ -13,3 +13,6 @@ func SetRcloneBin(bin string) (restore func()) {
 	rcloneBin = func() string { return bin }
 	return func() { rcloneBin = prev }
 }
+
+// DBRemotePath exposes dbRemotePath.
+var DBRemotePath = dbRemotePath

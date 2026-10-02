@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/daksh7011/immich-backup/internal/docker"
@@ -104,10 +105,26 @@ var rcloneBin = rclonebin.Path
 // The media sync excludes it so `rclone sync` never deletes uploaded dumps.
 const dbRemoteDir = "db"
 
-// rclone exit codes that mean the whole run failed, as opposed to individual
-// files being skipped: 2 = syntax/usage error, 3 = directory not found,
-// 7 = fatal error (e.g. account suspended). See https://rclone.org/docs/#exit-code
-var rcloneFatalExitCodes = map[int]bool{2: true, 3: true, 7: true}
+// dbRemotePath returns the db/ directory inside remote: the directory the
+// media sync's --exclude /db/** protects. Plain concatenation breaks for a
+// remote with an empty path ("nas:" gives "nas:/db", an absolute path on
+// sftp, ftp, smb and local) and for a trailing slash ("b2:x/" gives
+// "b2:x//db").
+func dbRemotePath(remote string) string {
+	trimmed := strings.TrimRight(remote, "/")
+	if strings.HasSuffix(trimmed, ":") && trimmed == remote {
+		return remote + dbRemoteDir // "nas:" → "nas:db"
+	}
+	return trimmed + "/" + dbRemoteDir // "nas:/" → "nas:/db", "b2:x/" → "b2:x/db"
+}
+
+// rclone exit codes that report individual files failing while the rest of
+// the run went on: 1 = uncategorised error, 4 = file not found,
+// 5 = temporary error, 6 = less serious errors, 9 = no files transferred.
+// Any other code (2 usage error, 3 directory not found, 7 fatal error, 8
+// transfer limit) means the run as a whole failed.
+// See https://rclone.org/docs/#exit-code
+var rcloneFileErrorExitCodes = map[int]bool{1: true, 4: true, 5: true, 6: true, 9: true}
 
 // Private JSON structs used only inside this package.
 type rcloneLogLine struct {
@@ -171,7 +188,7 @@ func sendMsg(ch chan<- any, msg any) {
 
 // Runner orchestrates database and media backup operations.
 type Runner interface {
-	RunDatabase(container, pgUser, destPath string) error
+	RunDatabase(ctx context.Context, container, pgUser, destPath string) error
 	RunDBUpload(ctx context.Context, dumpPath, remoteDir string, ch chan<- any) error
 	RunMedia(ctx context.Context, remote, srcDir string, opts MediaOpts, ch chan<- any) error
 }
@@ -197,28 +214,33 @@ func New(exec docker.Executor, rcloneConf string, logWriter io.Writer) Runner {
 	return &BackupRunner{exec: exec, rcloneConf: rcloneConf, logWriter: logWriter}
 }
 
-// RunDatabase dumps all databases from the Postgres container via pg_dumpall,
-// gzips the output, and writes it to destPath.
-func (r *BackupRunner) RunDatabase(container, pgUser, destPath string) error {
-	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+// RunDatabase dumps all databases from the Postgres container via pg_dumpall
+// and streams the output through gzip into destPath, so the dump is never
+// held in memory. The file is created 0600 because it holds password hashes
+// and API keys, and it is removed again if the dump fails. Cancelling ctx
+// aborts the dump.
+func (r *BackupRunner) RunDatabase(ctx context.Context, container, pgUser, destPath string) (err error) {
+	if err := os.MkdirAll(filepath.Dir(destPath), 0700); err != nil {
 		return fmt.Errorf("create dump dir: %w", err)
 	}
 
-	out, err := r.exec.Exec(container, "pg_dumpall", "-U", pgUser)
-	if err != nil {
-		return fmt.Errorf("pg_dumpall in %s: %w", container, err)
-	}
-
-	f, err := os.Create(destPath)
+	f, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
 		return fmt.Errorf("create dump file: %w", err)
 	}
-	defer f.Close()
+	defer func() {
+		if cerr := f.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("close dump file: %w", cerr)
+		}
+		if err != nil {
+			_ = os.Remove(destPath)
+		}
+	}()
 
 	gz := gzip.NewWriter(f)
-	if _, err := gz.Write(out); err != nil {
+	if err := r.exec.ExecStream(ctx, gz, container, "pg_dumpall", "-U", pgUser); err != nil {
 		_ = gz.Close()
-		return fmt.Errorf("write gzip: %w", err)
+		return fmt.Errorf("pg_dumpall in %s: %w", container, err)
 	}
 	if err := gz.Close(); err != nil {
 		return fmt.Errorf("flush gzip: %w", err)
@@ -241,7 +263,7 @@ func (r *BackupRunner) RunDBUpload(ctx context.Context, dumpPath, remoteDir stri
 	args := []string{
 		"--config", r.rcloneConf,
 		"copy", dumpPath, remoteDir,
-		"--use-json-log", "--stats", "1s", "--log-level", "DEBUG",
+		"--use-json-log", "--stats", "1s", "--log-level", "INFO",
 		"--transfers", "1",
 	}
 	cmd := exec.CommandContext(ctx, rcloneBin(), args...)
@@ -332,12 +354,14 @@ func CheckUploadLocation(dir string) error {
 // subdirectory is excluded: it holds the dumps uploaded by RunDBUpload, and
 // without the exclude `rclone sync` would delete them as extraneous files.
 // Excluded files are left untouched on the remote (no --delete-excluded).
+// INFO is the lowest log level that still carries the stats and error lines
+// ParseRcloneLine needs; DEBUG adds a line per unchanged file to rclone.log.
 func mediaSyncArgs(rcloneConf, srcDir, remote string, opts MediaOpts) []string {
 	return []string{
 		"--config", rcloneConf,
 		"sync", srcDir, remote,
 		"--exclude", "/" + dbRemoteDir + "/**",
-		"--use-json-log", "--stats", "1s", "--log-level", "DEBUG",
+		"--use-json-log", "--stats", "1s", "--log-level", "INFO",
 		"--ignore-errors",
 		"--fast-list",
 		"--transfers", strconv.Itoa(opts.Transfers),
@@ -348,7 +372,8 @@ func mediaSyncArgs(rcloneConf, srcDir, remote string, opts MediaOpts) []string {
 
 // mediaSyncResult maps rclone's exit status to RunMedia's error. Any non-zero
 // exit is an error; it is a *PartialError only when rclone reported file-level
-// errors and the exit code is not one that means the whole run failed.
+// errors and exited by itself with a file-level exit code. rclone killed by a
+// signal (OOM killer, shutdown) never finished, so that is a plain error.
 // A zero exit is success even if errors were logged: rclone logs failed
 // attempts at error level and then succeeds on retry.
 func mediaSyncResult(waitErr error, fileErrors int) error {
@@ -356,7 +381,8 @@ func mediaSyncResult(waitErr error, fileErrors int) error {
 		return nil
 	}
 	var exitErr *exec.ExitError
-	if fileErrors > 0 && errors.As(waitErr, &exitErr) && !rcloneFatalExitCodes[exitErr.ExitCode()] {
+	if fileErrors > 0 && errors.As(waitErr, &exitErr) && exitErr.Exited() &&
+		rcloneFileErrorExitCodes[exitErr.ExitCode()] {
 		return fmt.Errorf("rclone sync: %w", &PartialError{FileErrors: fileErrors, Err: waitErr})
 	}
 	return fmt.Errorf("rclone sync: %w", waitErr)
@@ -412,8 +438,10 @@ func (r *BackupRunner) RunMedia(ctx context.Context, remote, srcDir string, opts
 
 // Run orchestrates a full backup: database dump → upload dump → media sync.
 // Progress, errors, and completion are sent to ch for live TUI display.
-// If ctx is cancelled in-flight, the active rclone subprocess is killed and
-// the channel is closed without sending DoneMsg.
+// If ctx is cancelled in-flight, the active rclone subprocess or dump is
+// stopped and the channel is closed without sending DoneMsg. The channel is
+// closed only after the temp dump is removed, so a caller that exits once it
+// closes leaves nothing behind.
 // skipDB skips the database dump+upload; skipMedia skips the rclone media sync.
 func Run(
 	ctx context.Context,
@@ -424,12 +452,22 @@ func Run(
 	logWriter io.Writer,
 	ch chan<- any,
 ) {
+	defer close(ch)
+
 	// send is a blocking send used for phase transitions and terminal messages
 	// (PhaseMsg, ErrorMsg, DoneMsg). These must not be dropped — losing a terminal
 	// message leaves the TUI frozen. Progress-tick messages (DBUploadProgressMsg,
 	// MediaProgressMsg) use the non-blocking sendMsg helper in their respective
 	// Run* methods and are safe to drop under backpressure.
 	send := func(msg any) { ch <- msg }
+
+	// fail reports err as the run's error unless ctx was cancelled, in which
+	// case the channel just closes.
+	fail := func(err error) {
+		if ctx.Err() == nil {
+			send(ErrorMsg{Err: err})
+		}
+	}
 
 	if logWriter == nil {
 		logWriter = io.Discard
@@ -440,25 +478,27 @@ func Run(
 
 	if !skipDB {
 		send(PhaseMsg{Phase: PhaseDBDump})
-		dumpPath := filepath.Join(os.TempDir(),
+		// A private (0700) dir keeps the dump unreadable to other users of a
+		// shared /tmp while keeping its timestamped name for the remote.
+		dumpDir, err := os.MkdirTemp("", "immich-backup-")
+		if err != nil {
+			fail(fmt.Errorf("database backup: create temp dir: %w", err))
+			return
+		}
+		// Removed on every path, including a cancelled run, before ch closes.
+		defer os.RemoveAll(dumpDir)
+		dumpPath := filepath.Join(dumpDir,
 			fmt.Sprintf("immich-db-%s.sql.gz", time.Now().Format("20060102-150405")))
-		if err := r.RunDatabase(container, pgUser, dumpPath); err != nil {
-			send(ErrorMsg{Err: fmt.Errorf("database backup: %w", err)})
-			close(ch)
+		if err := r.RunDatabase(ctx, container, pgUser, dumpPath); err != nil {
+			fail(fmt.Errorf("database backup: %w", err))
 			return
 		}
 
 		send(PhaseMsg{Phase: PhaseDBUpload})
-		remoteDBDir := rcloneRemote + "/" + dbRemoteDir
-		uploadErr := r.RunDBUpload(ctx, dumpPath, remoteDBDir, ch)
-		_ = os.Remove(dumpPath) // best-effort; uploaded or failed, temp file is no longer needed
+		uploadErr := r.RunDBUpload(ctx, dumpPath, dbRemotePath(rcloneRemote), ch)
+		_ = os.Remove(dumpPath) // free the space before the media sync
 		if uploadErr != nil {
-			if ctx.Err() != nil {
-				close(ch)
-				return
-			}
-			send(ErrorMsg{Err: fmt.Errorf("upload database dump: %w", uploadErr)})
-			close(ch)
+			fail(fmt.Errorf("upload database dump: %w", uploadErr))
 			return
 		}
 	}
@@ -466,16 +506,10 @@ func Run(
 	if !skipMedia {
 		send(PhaseMsg{Phase: PhaseMedia})
 		if err := r.RunMedia(ctx, rcloneRemote, uploadLocation, opts, ch); err != nil {
-			if ctx.Err() != nil {
-				close(ch)
-				return
-			}
-			send(ErrorMsg{Err: fmt.Errorf("media sync: %w", err)})
-			close(ch)
+			fail(fmt.Errorf("media sync: %w", err))
 			return
 		}
 	}
 
 	send(DoneMsg{})
-	close(ch)
 }

@@ -111,12 +111,27 @@ func checkDockerSocket(ex docker.Executor) CheckResult {
 			Name:    "Docker Socket",
 			OK:      false,
 			Message: fmt.Sprintf("Docker socket unreachable at %s: %v", docker.Host(), err),
-			Remedy: "Ensure Docker is running and your user has socket access (docker group). " +
-				"For rootless Docker, Colima or Podman, export DOCKER_HOST " +
-				"(e.g. unix://$XDG_RUNTIME_DIR/docker.sock) and re-run `immich-backup daemon install`",
+			Remedy:  dockerSocketRemedy(err),
 		}
 	}
 	return CheckResult{Name: "Docker Socket", OK: true, Message: "Docker socket accessible"}
+}
+
+// dockerSocketRemedy explains how to fix a failed socket probe. For
+// "permission denied" it also covers the case a fresh shell cannot show:
+// scheduled runs on Linux keep the groups the systemd user manager started
+// with, and with lingering on that manager outlives every logout, so a later
+// `usermod -aG docker` does not reach it until it restarts.
+func dockerSocketRemedy(err error) string {
+	remedy := "Ensure Docker is running and your user has socket access (docker group). " +
+		"For rootless Docker, Colima or Podman, export DOCKER_HOST " +
+		"(e.g. unix://$XDG_RUNTIME_DIR/docker.sock) and re-run `immich-backup daemon install`"
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "permission denied") {
+		remedy += ". On Linux, scheduled runs use the groups your systemd user manager started with: " +
+			"after adding yourself to the docker group, run `sudo systemctl restart user@$(id -u).service` " +
+			"(this ends your running user services) or reboot"
+	}
+	return remedy
 }
 
 func checkPostgresContainer(ex docker.Executor, name string) CheckResult {

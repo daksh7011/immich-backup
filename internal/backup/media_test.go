@@ -11,15 +11,24 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/daksh7011/immich-backup/internal/backup"
 )
 
 // fakeRcloneEnv, when set, turns the test binary into a fake rclone:
 // "<exitCode>:<errorLines>" — it prints errorLines JSON error-level lines to
-// stderr and exits with exitCode. Lets RunMedia's exit handling be tested
-// without a real rclone binary.
+// stderr and exits with exitCode, or kills itself when exitCode is
+// killedExitCode. Lets RunMedia's exit handling be tested without a real
+// rclone binary.
 const fakeRcloneEnv = "IMMICH_BACKUP_FAKE_RCLONE"
+
+// fakeRcloneArgsEnv, when set, names a file the fake rclone appends its
+// argv to, one invocation per line.
+const fakeRcloneArgsEnv = "IMMICH_BACKUP_FAKE_RCLONE_ARGS"
+
+// killedExitCode makes the fake rclone kill itself, as the OOM killer would.
+const killedExitCode = -9
 
 func TestMain(m *testing.M) {
 	if spec := os.Getenv(fakeRcloneEnv); spec != "" {
@@ -32,9 +41,21 @@ func runFakeRclone(spec string) int {
 	codeStr, nStr, _ := strings.Cut(spec, ":")
 	code, _ := strconv.Atoi(codeStr)
 	n, _ := strconv.Atoi(nStr)
+	if path := os.Getenv(fakeRcloneArgsEnv); path != "" {
+		if f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600); err == nil {
+			fmt.Fprintln(f, strings.Join(os.Args[1:], " "))
+			_ = f.Close()
+		}
+	}
 	fmt.Fprintln(os.Stderr, `{"level":"info","msg":"starting"}`)
 	for i := range n {
 		fmt.Fprintf(os.Stderr, `{"level":"error","msg":"file%d.jpg: read failed"}`+"\n", i)
+	}
+	if code == killedExitCode {
+		if p, err := os.FindProcess(os.Getpid()); err == nil {
+			_ = p.Kill()
+		}
+		time.Sleep(time.Minute)
 	}
 	return code
 }

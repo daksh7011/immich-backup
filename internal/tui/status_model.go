@@ -3,6 +3,7 @@ package tui
 
 import (
 	"fmt"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/daksh7011/immich-backup/internal/status"
@@ -51,12 +52,12 @@ func (m StatusModel) View() tea.View {
 		}
 		out += fmt.Sprintf("  %s  %s\n",
 			dimStyle.Render("Last run:"),
-			dimStyle.Render(m.run.Time.Format("2006-01-02 15:04:05"))+" "+resultStyle.Render("["+m.run.Result+"]"))
+			dimStyle.Render(formatRunTime(m.run.Time))+" "+resultStyle.Render("["+m.run.Result+"]"))
 		if m.run.Result != status.ResultSuccess {
 			// The last attempt failed: say when data was last backed up in full.
 			lastOK := "never recorded"
 			if !m.run.LastSuccess.IsZero() {
-				lastOK = m.run.LastSuccess.Format("2006-01-02 15:04:05")
+				lastOK = formatRunTime(m.run.LastSuccess)
 			}
 			out += fmt.Sprintf("  %s  %s\n",
 				dimStyle.Render("Last ok: "),
@@ -89,4 +90,10 @@ func (m StatusModel) View() tea.View {
 
 	out += renderHints([]Hint{{"q / esc / enter", "quit"}})
 	return tea.NewView(out)
+}
+
+// formatRunTime shows a recorded run time (stored in UTC) in local time with
+// its zone, matching how the next scheduled run is shown.
+func formatRunTime(t time.Time) string {
+	return t.Local().Format("2006-01-02 15:04:05 MST")
 }

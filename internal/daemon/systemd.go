@@ -33,7 +33,9 @@ StandardError=append:{{.LogPath}}
 // The timer activates immich-backup.service by its matching name. It must not
 // Require= the service: that starts a backup every time the timer starts
 // (install, start, each login or boot) and stopping the service stops the
-// timer.
+// timer. Persistent=true makes a timer that starts after a missed elapse
+// (machine off, timer stopped or uninstalled) run the backup at once; the
+// README and the daemon command help say so.
 var timerTmpl = template.Must(template.New("timer").Parse(`[Unit]
 Description=immich-backup scheduled backup
 

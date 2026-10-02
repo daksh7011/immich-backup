@@ -2,7 +2,9 @@
 package doctor
 
 import (
+	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,13 +12,21 @@ import (
 	"testing"
 )
 
-type failingExecutor struct{}
+// failingExecutor fails every Docker call; err overrides the socket error.
+type failingExecutor struct{ err error }
 
 func (failingExecutor) Exec(string, string, ...string) ([]byte, error) {
 	return nil, errors.New("unused")
 }
 
-func (failingExecutor) IsContainerRunning(string) (bool, error) {
+func (failingExecutor) ExecStream(context.Context, io.Writer, string, string, ...string) error {
+	return errors.New("unused")
+}
+
+func (f failingExecutor) IsContainerRunning(string) (bool, error) {
+	if f.err != nil {
+		return false, f.err
+	}
 	return false, errors.New("dial unix /run/user/1000/docker.sock: connect: no such file or directory")
 }
 
@@ -78,5 +88,21 @@ func TestCheckDockerSocket_NamesHostAndDockerHostRemedy(t *testing.T) {
 	}
 	if !strings.Contains(r.Remedy, "DOCKER_HOST") || !strings.Contains(r.Remedy, "daemon install") {
 		t.Errorf("remedy should mention DOCKER_HOST and re-running daemon install, got %q", r.Remedy)
+	}
+}
+
+func TestCheckDockerSocket_PermissionDeniedNamesUserManager(t *testing.T) {
+	denied := failingExecutor{err: errors.New("permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock")}
+	r := checkDockerSocket(denied)
+	if r.OK {
+		t.Fatal("expected the socket check to fail")
+	}
+	if !strings.Contains(r.Remedy, "sudo systemctl restart user@$(id -u).service") {
+		t.Errorf("permission denied remedy should explain the user manager's stale groups, got: %s", r.Remedy)
+	}
+
+	other := checkDockerSocket(failingExecutor{})
+	if strings.Contains(other.Remedy, "user@") {
+		t.Errorf("a missing socket is not a group problem, got: %s", other.Remedy)
 	}
 }
