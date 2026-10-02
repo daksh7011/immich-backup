@@ -2,16 +2,18 @@
 package tui
 
 import (
-	tea "charm.land/bubbletea/v2"
+	"strings"
+
 	"charm.land/bubbles/v2/spinner"
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
 
 // DaemonResultMsg is sent by the goroutine running the daemon operation
 // when the operation completes (successfully or with an error).
 type DaemonResultMsg struct {
-	Msg string // success message shown as step detail; may be empty
-	Err error
+	Msg string // result text; a single line is the step detail, several lines a block below it
+	Err error  // shown on the step; Msg is still shown, e.g. the status that explains the error
 }
 
 // DaemonModel is the Bubble Tea model for daemon subcommands.
@@ -21,6 +23,7 @@ type DaemonModel struct {
 	steps   []step // single step for the active operation
 	done    bool
 	lastErr error
+	body    string // multi-line result text rendered below the step
 	spinner spinner.Model
 }
 
@@ -48,13 +51,21 @@ func (m DaemonModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch v := msg.(type) {
 
 	case DaemonResultMsg:
+		// Msg is kept even when Err is set: for `daemon status` it is the
+		// state that explains the error.
+		text := strings.TrimRight(v.Msg, "\n")
+		if strings.Contains(text, "\n") || (v.Err != nil && text != "") {
+			m.body = text
+		} else {
+			m.steps[0].detail = text
+		}
 		if v.Err != nil {
 			m.steps[0].state = stepError
-			m.steps[0].detail = v.Err.Error()
+			// Indent continuation lines of a multi-problem error under the step.
+			m.steps[0].detail = strings.ReplaceAll(v.Err.Error(), "\n", "\n    ")
 			m.lastErr = v.Err
 		} else {
 			m.steps[0].state = stepDone
-			m.steps[0].detail = v.Msg
 		}
 		m.done = true
 		return m, nil
@@ -89,6 +100,12 @@ func (m DaemonModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m DaemonModel) View() tea.View {
 	out := renderHeader("  Daemon  ")
 	out += renderSteps(m.steps, m.spinner)
+	if m.body != "" {
+		out += "\n"
+		for _, line := range strings.Split(m.body, "\n") {
+			out += "   " + line + "\n"
+		}
+	}
 	if m.done {
 		out += renderHints([]Hint{{"q / enter", "quit"}})
 	}

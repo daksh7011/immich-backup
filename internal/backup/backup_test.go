@@ -65,7 +65,7 @@ func TestRunDatabase_ProducesDump(t *testing.T) {
 
 	destPath := filepath.Join(t.TempDir(), "dump.sql.gz")
 	r := backup.New(newDockerClient(t), confPath, nil)
-	if err := r.RunDatabase(name, "postgres", destPath); err != nil {
+	if err := r.RunDatabase(ctx, name, "postgres", destPath); err != nil {
 		t.Fatalf("RunDatabase: %v", err)
 	}
 

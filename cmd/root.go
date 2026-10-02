@@ -3,12 +3,15 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
+	"time"
 
-	"github.com/spf13/cobra"
 	"github.com/daksh7011/immich-backup/internal/config"
+	"github.com/spf13/cobra"
 )
 
 type contextKey struct{}
@@ -27,6 +30,10 @@ func GetConfig(cmd *cobra.Command) *config.Config {
 var rootCmd = &cobra.Command{
 	Use:   "immich-backup",
 	Short: "Back up your Immich media library using rclone",
+	// Execute prints the returned error once; a runtime failure is not misuse,
+	// so the usage text would only bury it (and fill the daemon log).
+	SilenceUsage:  true,
+	SilenceErrors: true,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		// Commands that load config themselves or need no config.
 		// Use full CommandPath to avoid ambiguity (e.g. "status" vs "daemon status").
@@ -45,24 +52,68 @@ var rootCmd = &cobra.Command{
 		if skipPaths[cmd.CommandPath()] {
 			return nil
 		}
-		cfg, err := config.Load(config.DefaultConfigPath())
+		cfg, err := loadCommandConfig(cmd.CommandPath(), config.DefaultConfigPath(), config.StatusFilePath())
 		if err != nil {
-			slog.Error("config error", "error", err,
-				"remedy", "run `immich-backup configure` or edit ~/.immich-backup/config.yaml")
-			os.Exit(1)
+			return err
 		}
 		cmd.SetContext(context.WithValue(cmd.Context(), contextKey{}, cfg))
 		return nil
 	},
 }
 
+// loadCommandConfig loads the config for the command at cmdPath. A load failure
+// is logged with a remedy and, for `backup`, recorded as a failed run so a
+// scheduled backup that cannot even read its config shows up in `status`.
+func loadCommandConfig(cmdPath, configPath, statusPath string) (*config.Config, error) {
+	cfg, err := config.Load(configPath)
+	if err == nil {
+		return cfg, nil
+	}
+	slog.Error("config error", "error", err,
+		"remedy", "run `immich-backup configure` or edit ~/.immich-backup/config.yaml")
+	err = fmt.Errorf("config error: %w", err)
+	if cmdPath == "immich-backup backup" {
+		recordRun(statusPath, time.Now().UTC(), err)
+	}
+	return nil, err
+}
+
 // Execute is the entry point called from main.go.
 func Execute() {
-	printBanner()
+	maybePrintBanner(os.Stdout, stdoutIsTerminal)
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		reportError(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// shownError wraps an error a TUI has already displayed. The command still
+// exits non-zero, but Execute does not print the error a second time.
+type shownError struct{ error }
+
+func (e shownError) Unwrap() error { return e.error }
+
+// reportError prints err for Execute unless a TUI already showed it.
+func reportError(w io.Writer, err error) {
+	var shown shownError
+	if errors.As(err, &shown) {
+		return
+	}
+	fmt.Fprintln(w, "Error:", err)
+}
+
+// maybePrintBanner prints the banner only for an interactive terminal. Under
+// systemd or launchd stdout is the daemon log, where it would bury the log lines.
+func maybePrintBanner(w io.Writer, isTerminal func() bool) {
+	if isTerminal() {
+		printBanner(w)
+	}
+}
+
+// stdoutIsTerminal reports whether stdout is a terminal (not a file or pipe).
+func stdoutIsTerminal() bool {
+	fi, err := os.Stdout.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }
 
 func init() {

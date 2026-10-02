@@ -2,12 +2,18 @@
 package doctor
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
+	"runtime"
+	"strings"
 
 	"github.com/daksh7011/immich-backup/internal/config"
+	"github.com/daksh7011/immich-backup/internal/daemon"
 	"github.com/daksh7011/immich-backup/internal/docker"
+	"github.com/daksh7011/immich-backup/internal/rclonebin"
 )
 
 // CheckStartMsg is sent on the channel immediately before each check begins.
@@ -18,6 +24,7 @@ type CheckStartMsg struct{ Name string }
 type CheckResult struct {
 	Name    string
 	OK      bool
+	Warn    bool // with OK false: a problem worth fixing that does not block a backup
 	Message string
 	Remedy  string
 }
@@ -26,37 +33,57 @@ type CheckResult struct {
 // It does NOT exit or launch interactive processes — callers decide what to do.
 //
 // Check order:
-//  1. rclone binary in PATH
+//  1. rclone binary in PATH or a well-known install dir
 //  2. rcloneConfPath exists and has ≥1 remote
 //  3. Docker socket accessible
-//  4. Immich Postgres container running
+//  4. Immich Postgres container running and accepting connections
 //  5. Config valid
 func Check(ex docker.Executor, cfg *config.Config, rcloneConfPath string) []CheckResult {
 	return []CheckResult{
 		checkRcloneBinary(),
 		checkRcloneConf(rcloneConfPath),
 		checkDockerSocket(ex),
-		checkPostgresContainer(ex, cfg.Immich.PostgresContainer),
+		checkPostgresContainer(ex, cfg.Immich.PostgresContainer, cfg.Immich.PostgresUser),
 		checkConfig(cfg),
 	}
 }
 
 func checkRcloneBinary() CheckResult {
-	_, err := exec.LookPath("rclone")
+	path, err := rclonebin.Resolve()
 	if err != nil {
 		return CheckResult{
 			Name:    "rclone Binary",
 			OK:      false,
-			Message: "rclone not found in PATH",
+			Message: err.Error(),
 			Remedy:  "Install rclone: https://rclone.org/install/",
 		}
 	}
-	return CheckResult{Name: "rclone Binary", OK: true, Message: "rclone found"}
+	return CheckResult{Name: "rclone Binary", OK: true, Message: fmt.Sprintf("rclone found at %s", path)}
 }
 
 func checkRcloneConf(path string) CheckResult {
-	out, err := exec.Command("rclone", "listremotes", "--config", path).Output()
-	if err != nil || len(out) == 0 {
+	out, err := exec.Command(rclonebin.Path(), "listremotes", "--config", path).Output()
+	return rcloneConfResult(path, out, err)
+}
+
+// rcloneConfResult turns `rclone listremotes` output into a check result.
+// When rclone itself fails (e.g. an encrypted config with no password), its
+// stderr is reported instead of a misleading "no remotes configured".
+func rcloneConfResult(path string, out []byte, err error) CheckResult {
+	if err != nil {
+		msg := err.Error()
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && len(bytes.TrimSpace(ee.Stderr)) > 0 {
+			msg = strings.TrimSpace(string(ee.Stderr))
+		}
+		return CheckResult{
+			Name:    "rclone Config",
+			OK:      false,
+			Message: fmt.Sprintf("rclone listremotes --config %s failed: %s", path, msg),
+			Remedy:  "Fix the rclone config, or run `immich-backup configure` to recreate the remote",
+		}
+	}
+	if len(bytes.TrimSpace(out)) == 0 {
 		return CheckResult{
 			Name:    "rclone Config",
 			OK:      false,
@@ -72,7 +99,7 @@ func checkDockerSocket(ex docker.Executor) CheckResult {
 		return CheckResult{
 			Name:    "Docker Socket",
 			OK:      false,
-			Message: "Docker socket unreachable (client could not be created)",
+			Message: fmt.Sprintf("Docker socket unreachable at %s (client could not be created)", docker.Host()),
 			Remedy:  "Ensure Docker is running and that your user has socket access",
 		}
 	}
@@ -83,14 +110,35 @@ func checkDockerSocket(ex docker.Executor) CheckResult {
 		return CheckResult{
 			Name:    "Docker Socket",
 			OK:      false,
-			Message: fmt.Sprintf("Docker socket unreachable: %v", err),
-			Remedy:  "Ensure Docker is running and your user has socket access (docker group)",
+			Message: fmt.Sprintf("Docker socket unreachable at %s: %v", docker.Host(), err),
+			Remedy:  dockerSocketRemedy(err),
 		}
 	}
 	return CheckResult{Name: "Docker Socket", OK: true, Message: "Docker socket accessible"}
 }
 
-func checkPostgresContainer(ex docker.Executor, name string) CheckResult {
+// dockerSocketRemedy explains how to fix a failed socket probe. For
+// "permission denied" it also covers the case a fresh shell cannot show:
+// scheduled runs on Linux keep the groups the systemd user manager started
+// with, and with lingering on that manager outlives every logout, so a later
+// `usermod -aG docker` does not reach it until it restarts.
+func dockerSocketRemedy(err error) string {
+	remedy := "Ensure Docker is running and your user has socket access (docker group). " +
+		"For rootless Docker, Colima or Podman, export DOCKER_HOST " +
+		"(e.g. unix://$XDG_RUNTIME_DIR/docker.sock) and re-run `immich-backup daemon install`"
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "permission denied") {
+		remedy += ". On Linux, scheduled runs use the groups your systemd user manager started with: " +
+			"after adding yourself to the docker group, run `sudo systemctl restart user@$(id -u).service` " +
+			"(this ends your running user services) or reboot"
+	}
+	return remedy
+}
+
+// checkPostgresContainer checks that the container is running and that
+// Postgres in it accepts connections. Right after the container starts
+// (at boot, or after a crash) Postgres may still be starting up or
+// recovering, and pg_dumpall would fail.
+func checkPostgresContainer(ex docker.Executor, name, user string) CheckResult {
 	if ex == nil {
 		return CheckResult{
 			Name:    "Postgres Container",
@@ -116,8 +164,28 @@ func checkPostgresContainer(ex docker.Executor, name string) CheckResult {
 			Remedy:  "Start the Immich stack: `docker compose up -d`",
 		}
 	}
+	if err := postgresReady(ex, name, user); err != nil {
+		return CheckResult{
+			Name:    "Postgres Container",
+			OK:      false,
+			Message: fmt.Sprintf("container %q is running but Postgres is not accepting connections: %v", name, err),
+			Remedy:  fmt.Sprintf("Wait for Postgres to finish starting, or check `docker logs %s`", name),
+		}
+	}
 	return CheckResult{Name: "Postgres Container", OK: true,
-		Message: fmt.Sprintf("container %q is running", name)}
+		Message: fmt.Sprintf("container %q is running and accepting connections", name)}
+}
+
+// postgresReady runs pg_isready in the container, which ships with
+// pg_dumpall in every Postgres image; it exits non-zero until the server
+// accepts connections.
+func postgresReady(ex docker.Executor, name, user string) error {
+	var args []string
+	if user != "" {
+		args = append(args, "-U", user)
+	}
+	_, err := ex.Exec(name, "pg_isready", args...)
+	return err
 }
 
 func checkConfig(cfg *config.Config) CheckResult {
@@ -132,25 +200,112 @@ func checkConfig(cfg *config.Config) CheckResult {
 	return CheckResult{Name: "Config", OK: true, Message: "config is valid"}
 }
 
-// CheckAsync runs the same five checks as Check but streams progress via ch.
+// checkConfigLoad reports loadErr (a parse or validation error from
+// config.Load) as the failed Config check, so doctor names the real problem
+// instead of validating the empty fallback config.
+func checkConfigLoad(cfg *config.Config, loadErr error) CheckResult {
+	if loadErr != nil {
+		return CheckResult{
+			Name:    "Config",
+			OK:      false,
+			Message: fmt.Sprintf("config load failed: %v", loadErr),
+			Remedy:  "Run `immich-backup configure` or edit ~/.immich-backup/config.yaml",
+		}
+	}
+	return checkConfig(cfg)
+}
+
+// Service is the part of daemon.Manager the background service checks use.
+type Service interface {
+	State() (daemon.State, error)
+	Definition() (*daemon.Definition, error)
+}
+
+type namedCheck struct {
+	name string
+	fn   func() CheckResult
+}
+
+// serviceChecks returns the background service checks for goos. They only
+// warn: a backup run by hand works without the service, so they never make
+// AnyFailed true. svc is nil where the platform has no service manager.
+func serviceChecks(svc Service, goos string) []namedCheck {
+	checks := []namedCheck{{"Daemon Program", func() CheckResult { return checkServiceProgram(svc, goos) }}}
+	if goos == "linux" && svc != nil {
+		checks = append(checks, namedCheck{"Daemon Linger", func() CheckResult { return checkServiceLinger(svc) }})
+	}
+	return checks
+}
+
+// checkServiceProgram checks that the installed unit or plist runs a program
+// that still exists; after a move or an upgrade that removed it, every
+// scheduled run fails before the backup starts (systemd 203/EXEC).
+func checkServiceProgram(svc Service, goos string) CheckResult {
+	const name = "Daemon Program"
+	if svc == nil {
+		return CheckResult{Name: name, Warn: true,
+			Message: fmt.Sprintf("the background service is not supported on %s; schedule `immich-backup backup` yourself", goos)}
+	}
+	def, err := svc.Definition()
+	if err != nil {
+		return CheckResult{Name: name, Warn: true, Message: err.Error(),
+			Remedy: "Re-run `immich-backup daemon install`"}
+	}
+	if def == nil {
+		return CheckResult{Name: name, Warn: true,
+			Message: "the background service is not installed, so no backups are scheduled",
+			Remedy:  "Run `immich-backup daemon install`"}
+	}
+	if def.BinaryPath == "" {
+		return CheckResult{Name: name, Warn: true,
+			Message: fmt.Sprintf("cannot find the program in %s", def.Path),
+			Remedy:  "Re-run `immich-backup daemon install`"}
+	}
+	if err := daemon.CheckProgram(def.BinaryPath); err != nil {
+		return CheckResult{Name: name, Warn: true,
+			Message: fmt.Sprintf("the installed service runs %s: %v", def.BinaryPath, err),
+			Remedy:  "Re-run `immich-backup daemon install` (needed after moving or upgrading immich-backup)"}
+	}
+	return CheckResult{Name: name, OK: true, Message: fmt.Sprintf("the service runs %s", def.BinaryPath)}
+}
+
+// checkServiceLinger checks that systemd keeps the user's timer running
+// after logout, which a headless server depends on.
+func checkServiceLinger(svc Service) CheckResult {
+	const name = "Daemon Linger"
+	st, err := svc.State()
+	if err != nil {
+		return CheckResult{Name: name, Warn: true, Message: fmt.Sprintf("cannot query systemd: %v", err)}
+	}
+	if st.Linger == "yes" {
+		return CheckResult{Name: name, OK: true, Message: "lingering is on: the timer runs while you are logged out"}
+	}
+	return CheckResult{Name: name, Warn: true,
+		Message: fmt.Sprintf("lingering is %s for user %q: systemd stops the backup timer when you log out", st.Linger, st.User),
+		Remedy:  fmt.Sprintf("Run `sudo loginctl enable-linger %s`", st.User)}
+}
+
+// CheckAsync runs the same five checks as Check, then the non-blocking
+// background service checks for svc (nil when the platform has none), and
+// streams progress via ch.
+// A non-nil cfgErr (from config.Load) is reported as the Config check result.
 // For each check it sends CheckStartMsg{Name} then CheckResult.
 // The caller is responsible for closing ch after CheckAsync returns.
 // ctx cancellation stops further checks and channel sends, preventing a goroutine
 // leak when the TUI exits early (e.g. Ctrl+C) before all checks complete.
 // Note: an in-progress check function itself is not interrupted by ctx — only
 // the sends between checks are guarded.
-func CheckAsync(ctx context.Context, ex docker.Executor, cfg *config.Config, rcloneConfPath string, ch chan<- any) {
-	type namedCheck struct {
-		name string
-		fn   func() CheckResult
-	}
+func CheckAsync(ctx context.Context, ex docker.Executor, cfg *config.Config, cfgErr error, rcloneConfPath string, svc Service, ch chan<- any) {
 	checks := []namedCheck{
 		{"rclone Binary", checkRcloneBinary},
 		{"rclone Config", func() CheckResult { return checkRcloneConf(rcloneConfPath) }},
 		{"Docker Socket", func() CheckResult { return checkDockerSocket(ex) }},
-		{"Postgres Container", func() CheckResult { return checkPostgresContainer(ex, cfg.Immich.PostgresContainer) }},
-		{"Config", func() CheckResult { return checkConfig(cfg) }},
+		{"Postgres Container", func() CheckResult {
+			return checkPostgresContainer(ex, cfg.Immich.PostgresContainer, cfg.Immich.PostgresUser)
+		}},
+		{"Config", func() CheckResult { return checkConfigLoad(cfg, cfgErr) }},
 	}
+	checks = append(checks, serviceChecks(svc, runtime.GOOS)...)
 	for _, c := range checks {
 		select {
 		case ch <- CheckStartMsg{Name: c.name}:
@@ -166,10 +321,10 @@ func CheckAsync(ctx context.Context, ex docker.Executor, cfg *config.Config, rcl
 	}
 }
 
-// AnyFailed returns true if any result has OK == false.
+// AnyFailed returns true if any result failed; warnings do not count.
 func AnyFailed(results []CheckResult) bool {
 	for _, r := range results {
-		if !r.OK {
+		if !r.OK && !r.Warn {
 			return true
 		}
 	}

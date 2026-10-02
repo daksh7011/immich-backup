@@ -253,3 +253,130 @@ func TestLoad_NewConfigHasPerfDefaults(t *testing.T) {
 		t.Errorf("BufferSize: got %q, want 64M", cfg.Backup.BufferSize)
 	}
 }
+
+// setHome points os.UserHomeDir at dir on every platform.
+func setHome(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+}
+
+func TestLoad_ExpandsTildeInPaths(t *testing.T) {
+	home := t.TempDir()
+	setHome(t, home)
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	_ = os.WriteFile(path, []byte(`
+immich:
+  upload_location: ~/photos
+  postgres_container: immich_postgres
+  postgres_user: postgres
+  postgres_db: immich
+backup:
+  rclone_remote: "b2:test"
+  schedule: "0 3 * * *"
+  db_backup_frequency: "0 */6 * * *"
+  retention:
+    daily: 7
+    weekly: 4
+daemon:
+  log_path: ~/.immich-backup/logs/daemon.log
+`), 0644)
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := filepath.Join(home, ".immich-backup", "logs", "daemon.log"); cfg.Daemon.LogPath != want {
+		t.Errorf("log_path: got %q, want %q", cfg.Daemon.LogPath, want)
+	}
+	if want := filepath.Join(home, "photos"); cfg.Immich.UploadLocation != want {
+		t.Errorf("upload_location: got %q, want %q", cfg.Immich.UploadLocation, want)
+	}
+}
+
+func TestLoad_MissingLogPathGetsDefault(t *testing.T) {
+	setHome(t, t.TempDir())
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	_ = os.WriteFile(path, []byte(`
+immich:
+  upload_location: /mnt/immich
+  postgres_container: immich_postgres
+  postgres_user: postgres
+  postgres_db: immich
+backup:
+  rclone_remote: "b2:test"
+  schedule: "0 3 * * *"
+  db_backup_frequency: "0 */6 * * *"
+  retention:
+    daily: 7
+    weekly: 4
+`), 0644)
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := config.DefaultLogPath(); cfg.Daemon.LogPath != want {
+		t.Errorf("log_path: got %q, want %q", cfg.Daemon.LogPath, want)
+	}
+}
+
+func TestValidate_RejectsRelativeLogPath(t *testing.T) {
+	for _, p := range []string{"logs/daemon.log", "daemon.log", "~other/daemon.log"} {
+		cfg := config.Config{
+			Immich: config.ImmichConfig{
+				UploadLocation: "/mnt/immich", PostgresContainer: "c",
+				PostgresUser: "u", PostgresDB: "d",
+			},
+			Backup: config.BackupConfig{
+				RcloneRemote: "b2:test", Schedule: "0 3 * * *",
+				DBBackupFrequency: "0 */6 * * *",
+				Retention:         config.RetentionConfig{Daily: 7, Weekly: 4},
+				Transfers:         1, Checkers: 1, BufferSize: "64M",
+			},
+			Daemon: config.DaemonConfig{LogPath: p},
+		}
+		err := cfg.Validate()
+		if err == nil {
+			t.Errorf("%q: expected validation error for relative log_path", p)
+			continue
+		}
+		if !strings.Contains(err.Error(), "daemon.log_path must be an absolute path") {
+			t.Errorf("%q: expected absolute-path error, got: %v", p, err)
+		}
+	}
+}
+
+func TestValidate_RejectsRelativeUploadLocation(t *testing.T) {
+	for _, p := range []string{"./library", "library", "~other/library"} {
+		cfg := config.Config{
+			Immich: config.ImmichConfig{
+				UploadLocation: p, PostgresContainer: "c",
+				PostgresUser: "u", PostgresDB: "d",
+			},
+			Backup: config.BackupConfig{
+				RcloneRemote: "b2:test", Schedule: "0 3 * * *",
+				DBBackupFrequency: "0 */6 * * *",
+				Retention:         config.RetentionConfig{Daily: 7, Weekly: 4},
+				Transfers:         1, Checkers: 1, BufferSize: "64M",
+			},
+			Daemon: config.DaemonConfig{LogPath: "/tmp/daemon.log"},
+		}
+		err := cfg.Validate()
+		if err == nil {
+			t.Errorf("%q: expected validation error for relative upload_location", p)
+			continue
+		}
+		if !strings.Contains(err.Error(), "immich.upload_location: must be an absolute path") {
+			t.Errorf("%q: expected absolute-path error, got: %v", p, err)
+		}
+	}
+}
+
+func TestValidateUploadLocation_AcceptsAbsoluteAndHome(t *testing.T) {
+	for _, p := range []string{"/mnt/immich/library", "~/immich/library", "~"} {
+		if err := config.ValidateUploadLocation(p); err != nil {
+			t.Errorf("%q: unexpected error: %v", p, err)
+		}
+	}
+}

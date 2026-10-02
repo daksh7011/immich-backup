@@ -4,8 +4,8 @@ package tui
 import (
 	"fmt"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/spinner"
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/daksh7011/immich-backup/internal/doctor"
 )
@@ -51,13 +51,18 @@ func (m DoctorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.steps[m.current].state = stepDone
 				m.steps[m.current].detail = v.Message
 			} else {
-				m.steps[m.current].state = stepError
 				detail := v.Message
 				if v.Remedy != "" {
 					detail += " → " + v.Remedy
 				}
 				m.steps[m.current].detail = detail
-				m.anyFailed = true
+				if v.Warn {
+					// A warning is shown but does not fail doctor.
+					m.steps[m.current].state = stepWarn
+				} else {
+					m.steps[m.current].state = stepError
+					m.anyFailed = true
+				}
 			}
 			m.current++ // advance past completed step; guards against duplicate results
 		}
@@ -93,19 +98,28 @@ func (m DoctorModel) View() tea.View {
 	out += renderSteps(m.steps, m.spinner)
 
 	if m.done && len(m.steps) > 0 {
-		passed := 0
+		passed, warned := 0, 0
 		for _, s := range m.steps {
-			if s.state == stepDone {
+			switch s.state {
+			case stepDone:
 				passed++
+			case stepWarn:
+				warned++
 			}
 		}
 		total := len(m.steps)
 		summary := fmt.Sprintf("%d/%d checks passed", passed, total)
+		if warned > 0 {
+			summary += fmt.Sprintf(", %d warning(s)", warned)
+		}
 		out += "\n"
-		if passed == total {
-			out += "  " + okStyle.Render(summary) + "\n"
-		} else {
+		switch {
+		case m.anyFailed:
 			out += "  " + errStyle.Render(summary) + "\n"
+		case warned > 0:
+			out += "  " + warnStyle.Render(summary) + "\n"
+		default:
+			out += "  " + okStyle.Render(summary) + "\n"
 		}
 		out += renderHints([]Hint{{"q / esc / enter", "quit"}})
 	}

@@ -38,5 +38,19 @@ brews:
     license: MIT
     install: |
       bin.install "immich-backup"
+    caveats: |
+      To schedule daily backups, run as your own user (not with sudo):
+        immich-backup setup
+        immich-backup daemon install
+      After every `brew upgrade immich-backup`, re-run `immich-backup daemon install`
+      so the background service picks up the new version, then check it with
+      `immich-backup daemon status`.
+      Linux: scheduled runs need lingering. `daemon install` turns it on; if it
+      reports that it could not, run:
+        sudo loginctl enable-linger $USER
+      macOS: the job runs only while you are logged in to the desktop. If your Immich
+      library is on an external or protected volume, grant Full Disk Access to the
+      binary the service runs (`immich-backup doctor` shows the path) and re-grant
+      it after upgrades.
     test: |
       system "#{bin}/immich-backup", "--help"

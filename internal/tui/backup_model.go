@@ -3,6 +3,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -301,8 +302,14 @@ func (m BackupModel) View() tea.View {
 		}
 	}
 
-	// Fatal error or completion footer
-	if m.lastErr != nil {
+	// Fatal error, partial sync, or completion footer
+	var partial *backup.PartialError
+	if errors.As(m.lastErr, &partial) {
+		// rclone skipped some files; the rest synced but the run is not a success.
+		out += "\n"
+		out += " " + warnStyle.Render("!") + " " + warnStyle.Render(fmt.Sprintf(
+			"Backup incomplete — %d file error(s) during media sync; see errors above.", partial.FileErrors)) + "\n"
+	} else if m.lastErr != nil {
 		out += "\n"
 		if len(m.rcloneErrors) > 0 {
 			// Specific rclone messages are already shown above; avoid repeating

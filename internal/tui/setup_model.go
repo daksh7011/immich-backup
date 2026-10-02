@@ -46,33 +46,22 @@ func NewSetupModel(cfg *config.Config, rcloneConfigPath string) SetupModel {
 		huh.NewInput().
 			Title("Parallel file transfers").
 			Value(ts).
-			Validate(func(s string) error {
-				v, err := strconv.Atoi(s)
-				if err != nil || v <= 0 {
-					return fmt.Errorf("must be a positive integer")
-				}
-				return nil
-			}),
+			Validate(validatePositiveInt),
 		huh.NewInput().
 			Title("Parallel checkers").
 			Value(cs).
-			Validate(func(s string) error {
-				v, err := strconv.Atoi(s)
-				if err != nil || v <= 0 {
-					return fmt.Errorf("must be a positive integer")
-				}
-				return nil
-			}),
+			Validate(validatePositiveInt),
 		huh.NewInput().
 			Title("Buffer size (e.g. 64M)").
 			Value(&cfg.Backup.BufferSize).
-			Validate(func(s string) error {
-				if s == "" {
-					return fmt.Errorf("must not be empty")
-				}
-				return nil
-			}),
+			Validate(required("Buffer size")),
 	)
+
+	scheduleInput := huh.NewInput().
+		Title("Backup schedule (cron)").
+		Description("Daily run time as MINUTE HOUR * * * (e.g. 0 3 * * * runs at 03:00)").
+		Value(&cfg.Backup.Schedule).
+		Validate(validateScheduleInput)
 
 	var remoteGroup *huh.Group
 	if useSelect {
@@ -90,27 +79,20 @@ func NewSetupModel(cfg *config.Config, rcloneConfigPath string) SetupModel {
 				Title("rclone remote name").
 				Options(huh.NewOptions[string](remotes...)...).
 				Value(rn),
+			// The path may be empty: a crypt remote's root is already the
+			// directory its config points at.
 			huh.NewInput().
 				Title("Path / bucket (e.g. immich-backup)").
 				Value(rp),
-			huh.NewInput().
-				Title("Backup schedule (cron)").
-				Value(&cfg.Backup.Schedule),
-			huh.NewInput().
-				Title("DB backup frequency (cron)").
-				Value(&cfg.Backup.DBBackupFrequency),
+			scheduleInput,
 		)
 	} else {
 		remoteGroup = huh.NewGroup(
 			huh.NewInput().
 				Title("rclone remote (e.g. b2-encrypted:immich-backup)").
-				Value(&cfg.Backup.RcloneRemote),
-			huh.NewInput().
-				Title("Backup schedule (cron)").
-				Value(&cfg.Backup.Schedule),
-			huh.NewInput().
-				Title("DB backup frequency (cron)").
-				Value(&cfg.Backup.DBBackupFrequency),
+				Value(&cfg.Backup.RcloneRemote).
+				Validate(required("rclone remote")),
+			scheduleInput,
 		)
 	}
 
@@ -118,16 +100,20 @@ func NewSetupModel(cfg *config.Config, rcloneConfigPath string) SetupModel {
 		huh.NewGroup(
 			huh.NewInput().
 				Title("Immich upload location").
-				Value(&cfg.Immich.UploadLocation),
+				Value(&cfg.Immich.UploadLocation).
+				Validate(validateUploadLocation),
 			huh.NewInput().
 				Title("Postgres container name").
-				Value(&cfg.Immich.PostgresContainer),
+				Value(&cfg.Immich.PostgresContainer).
+				Validate(required("Postgres container name")),
 			huh.NewInput().
 				Title("Postgres user").
-				Value(&cfg.Immich.PostgresUser),
+				Value(&cfg.Immich.PostgresUser).
+				Validate(required("Postgres user")),
 			huh.NewInput().
 				Title("Postgres database").
-				Value(&cfg.Immich.PostgresDB),
+				Value(&cfg.Immich.PostgresDB).
+				Validate(required("Postgres database")),
 		),
 		remoteGroup,
 		perfGroup,
@@ -166,6 +152,40 @@ func (m SetupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m SetupModel) View() tea.View {
 	return tea.NewView(renderHeader("  Setup  ") + m.form.View())
+}
+
+// required returns a huh validator rejecting an empty or blank value.
+func required(name string) func(string) error {
+	return func(s string) error {
+		if strings.TrimSpace(s) == "" {
+			return fmt.Errorf("%s must not be empty", name)
+		}
+		return nil
+	}
+}
+
+// validatePositiveInt accepts a whole number greater than zero.
+func validatePositiveInt(s string) error {
+	v, err := strconv.Atoi(s)
+	if err != nil || v <= 0 {
+		return fmt.Errorf("must be a positive integer")
+	}
+	return nil
+}
+
+// validateUploadLocation applies config's rule, so the wizard cannot save a
+// relative path that only works from the directory it was run in.
+func validateUploadLocation(s string) error {
+	if err := required("Upload location")(s); err != nil {
+		return err
+	}
+	return config.ValidateUploadLocation(s)
+}
+
+// validateScheduleInput applies the rule `daemon install` enforces, so the
+// wizard cannot save a schedule the daemon would later reject.
+func validateScheduleInput(s string) error {
+	return config.ValidateDaemonSchedule(s)
 }
 
 // splitRemote splits a rclone remote string "name:path" into its components.
